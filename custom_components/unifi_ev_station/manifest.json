@@ -2,13 +2,13 @@
   "domain": "unifi_ev_station",
   "name": "UniFi EV Station",
   "codeowners": [
-    "@YOUR_GITHUB_USERNAME"
+    "@Woodhead02"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/YOUR_GITHUB_USERNAME/ha-unifi-ev-station",
+  "documentation": "https://github.com/Woodhead02/Unifi-EV-Lite-HomeAssistant",
   "integration_type": "hub",
   "iot_class": "local_polling",
   "requirements": [],
   "version": "0.1.0",
-  "issue_tracker": "https://github.com/YOUR_GITHUB_USERNAME/ha-unifi-ev-station/issues"
+  "issue_tracker": "https://github.com/Woodhead02/Unifi-EV-Lite-HomeAssistant/issues"
 }
