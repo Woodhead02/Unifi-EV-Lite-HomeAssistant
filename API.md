@@ -592,3 +592,19 @@ The action descriptor must come from the device's `type.supportedActions`. The a
 ```
 
 The action UUID is device/runtime metadata and should **not** be hard-coded. Discover the matching action by name and reuse its returned `id`. The value is expressed in amps. The valid upper bound depends on the station/breaker configuration.
+
+## Maximum output limits
+
+The Home Assistant Maximum Output control follows the EV Station circuit-breaker table rather than `deratingMaxCurrent` telemetry:
+
+| Circuit breaker | Maximum output | Approx. power at 240 V |
+|---:|---:|---:|
+| 20 A | 16 A | 3.8 kW |
+| 30 A | 24 A | 5.8 kW |
+| 40 A | 32 A | 7.7 kW |
+| 50 A | 40 A | 9.6 kW |
+| 60 A | 48 A | 11.5 kW |
+| 80 A | 64 A | 15.4 kW |
+| 100 A | 80 A | 19.2 kW |
+
+The write action remains `set_max_output_amp`. EV Station Lite firmware may not expose the configured setpoint in the polled `/devices` object, so the integration retains the last confirmed value locally in Home Assistant and restores it after restart.
