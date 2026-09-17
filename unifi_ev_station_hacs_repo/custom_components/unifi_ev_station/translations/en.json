@@ -1,0 +1,40 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to UniFi OS",
+        "description": "Use a local UniFi OS account with Connect permissions.",
+        "data": {
+          "host": "Console URL",
+          "username": "Username",
+          "password": "Password",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the UniFi console",
+      "invalid_auth": "Authentication failed",
+      "no_devices": "Connected, but the Connect devices endpoint returned no devices"
+    },
+    "abort": {
+      "already_configured": "This UniFi console is already configured"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "power": {"name": "Power"},
+      "current": {"name": "Current"},
+      "charging_status": {"name": "Charging status"},
+      "last_session_energy": {"name": "Last session energy"},
+      "last_session_charge_time": {"name": "Last session charge time"},
+      "history_energy": {"name": "History energy"},
+      "sessions": {"name": "Sessions"},
+      "energy_7d": {"name": "Energy 7 days"},
+      "energy_30d": {"name": "Energy 30 days"}
+    },
+    "switch": {
+      "allow_charging": {"name": "Allow charging"}
+    }
+  }
+}
