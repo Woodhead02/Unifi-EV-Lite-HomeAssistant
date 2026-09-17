@@ -1,6 +1,6 @@
  UniFi EV Station for Home Assistant
 
-A custom Home Assistant integration for locally managed Ubiquiti UniFi Connect EV Stations.
+A custom Home Assistant integration for locally managed Ubiquiti UniFi Connect EV Stations. This was heavily worked on via ChatGPT Codex, I am lazy and def not a dev, but I play on tv?
 
 This integration connects directly to a UniFi OS console, such as a Dream Machine, authenticates with a local UniFi account, discovers EV Stations managed by UniFi Connect, and exposes charging data and controls to Home Assistant.
 
@@ -27,7 +27,7 @@ Development and testing have been performed with UniFi EV Station Lite hardware 
 
 Known connector/device examples include:
 
-- J1773 EV Station Lite
+- EV Station Lite
 
 Other UniFi Connect EV Station models may work, but are not yet confirmed.
 
