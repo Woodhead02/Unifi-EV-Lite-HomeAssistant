@@ -28,7 +28,6 @@ Development and testing have been performed with UniFi EV Station Lite hardware 
 Known connector/device examples include:
 
 - J1773 EV Station Lite
-- NACS EV Station Lite
 
 Other UniFi Connect EV Station models may work, but are not yet confirmed.
 
@@ -42,7 +41,7 @@ Until this integration is included in the default HACS repository list, add it a
 4. Add this GitHub repository URL:
 
    ```text
-   https://github.com/YOUR_GITHUB_USERNAME/unifi-ev-station-ha
+   https://github.com/Woodhead02/unifi-ev-station-ha
    ```
 
 5. Select **Integration** as the repository type.
