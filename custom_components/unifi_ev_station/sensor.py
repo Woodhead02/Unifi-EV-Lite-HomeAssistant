@@ -34,6 +34,14 @@ def _status(item: dict[str, Any]) -> Any:
     )
 
 
+
+def _power_value(item: dict[str, Any], key: str) -> float | None:
+    value = item.get("power", {}).get(key)
+    if value is None:
+        return None
+    return round(float(value) / 1000, 3)
+
+
 def _last(item: dict[str, Any], key: str) -> Any:
     last = item["history"].get("last")
     return last.get(key) if isinstance(last, dict) else None
@@ -47,7 +55,7 @@ SENSORS = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfPower.KILO_WATT,
         suggested_display_precision=2,
-        value_fn=lambda i: round(float(i["power"].get("instantMW") or 0) / 1000, 3),
+        value_fn=lambda i: _power_value(i, "instantMW"),
     ),
     UniFiEVSensorDescription(
         key="current",
@@ -56,7 +64,7 @@ SENSORS = (
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         suggested_display_precision=2,
-        value_fn=lambda i: round(float(i["power"].get("instantMA") or 0) / 1000, 3),
+        value_fn=lambda i: _power_value(i, "instantMA"),
     ),
     UniFiEVSensorDescription(
         key="charging_status",

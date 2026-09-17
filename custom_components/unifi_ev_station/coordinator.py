@@ -9,7 +9,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import UniFiEVAuthError, UniFiEVClient, UniFiEVError
+from .api import (
+    UniFiEVAuthError,
+    UniFiEVClient,
+    UniFiEVError,
+    UniFiEVUnsupportedFeatureError,
+)
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -120,13 +125,29 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not device_id:
                     continue
 
-                power_stats = await self.client.get_power_stats(device_id, current=True)
-                latest = power_stats[-1] if power_stats else {}
+                try:
+                    power_stats = await self.client.get_power_stats(
+                        device_id, current=True
+                    )
+                    latest = power_stats[-1] if power_stats else {}
+                    power_supported = True
+                except UniFiEVUnsupportedFeatureError:
+                    # Some Connect EV devices expose charging history/status but do
+                    # not implement the optional powerStats / power insight API.
+                    # Do not fail the whole integration because one device lacks it.
+                    _LOGGER.debug(
+                        "Device %s does not support Connect power insight",
+                        device_id,
+                    )
+                    latest = {}
+                    power_supported = False
+
                 mac = str(device.get("mac") or _first(device, ("shadow", "mac")) or "")
 
                 result[device_id] = {
                     "device": device,
                     "power": latest,
+                    "power_supported": power_supported,
                     "history": summarize_history(self._history, mac),
                 }
 

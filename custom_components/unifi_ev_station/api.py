@@ -21,6 +21,10 @@ class UniFiEVPermissionError(UniFiEVError):
     """Request is not permitted."""
 
 
+class UniFiEVUnsupportedFeatureError(UniFiEVError):
+    """The device does not support an optional API feature."""
+
+
 class UniFiEVClient:
     """Small UniFi OS/Connect client using local session authentication."""
 
@@ -140,6 +144,13 @@ class UniFiEVClient:
             if response.status == 403:
                 raise UniFiEVPermissionError(
                     f"UniFi OS denied {method} {path}: {text[:300]}"
+                )
+            if (
+                response.status == 400
+                and "does not support power insight" in text.lower()
+            ):
+                raise UniFiEVUnsupportedFeatureError(
+                    f"Device does not support power insight for {path}"
                 )
             if response.status >= 400:
                 raise UniFiEVError(
