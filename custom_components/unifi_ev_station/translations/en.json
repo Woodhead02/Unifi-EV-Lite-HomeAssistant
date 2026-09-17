@@ -23,18 +23,52 @@
   },
   "entity": {
     "sensor": {
-      "power": {"name": "Power"},
-      "current": {"name": "Current"},
-      "charging_status": {"name": "Charging status"},
-      "last_session_energy": {"name": "Last session energy"},
-      "last_session_charge_time": {"name": "Last session charge time"},
-      "history_energy": {"name": "History energy"},
-      "sessions": {"name": "Sessions"},
-      "energy_7d": {"name": "Energy 7 days"},
-      "energy_30d": {"name": "Energy 30 days"}
+      "power": {
+        "name": "Power"
+      },
+      "current": {
+        "name": "Current"
+      },
+      "charging_status": {
+        "name": "Charging status"
+      },
+      "last_session_energy": {
+        "name": "Last session energy"
+      },
+      "last_session_charge_time": {
+        "name": "Last session charge time"
+      },
+      "history_energy": {
+        "name": "History energy"
+      },
+      "sessions": {
+        "name": "Sessions"
+      },
+      "energy_7d": {
+        "name": "Energy 7 days"
+      },
+      "energy_30d": {
+        "name": "Energy 30 days"
+      },
+      "maximum_output": {
+        "name": "Maximum output"
+      },
+      "energy_today": {
+        "name": "Energy today"
+      },
+      "energy_month_to_date": {
+        "name": "Energy month to date"
+      }
     },
     "switch": {
-      "allow_charging": {"name": "Allow charging"}
+      "allow_charging": {
+        "name": "Allow charging"
+      }
+    },
+    "number": {
+      "maximum_output_amps": {
+        "name": "Maximum output"
+      }
     }
   }
 }

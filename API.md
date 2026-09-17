@@ -554,3 +554,41 @@ This API is not guaranteed stable. When reporting a change, include:
 | `GET .../stats/evs/historicDevices` | Found in frontend code |
 | EV Station system/payment endpoints | Found in frontend code; not used |
 
+
+## Maximum output configuration
+
+The Connect frontend exposes EV Station `maxOutput` as the **Maximum Output (Amps)** configuration value. The frontend's generic device-config writer performs:
+
+```http
+PUT /proxy/connect/api/v2/devices/{device-id}
+Content-Type: application/json
+X-CSRF-Token: ...
+```
+
+with the changed device configuration as the JSON body. The observed frontend model includes breaker-based load limits of 15A→12A, 20A→16A, 30A→24A, 40A→32A, 50A→40A, 60A→48A, and 70A→50A.
+
+**Status:** the read-side `maxOutput` field and generic `PUT /devices/{id}` writer are confirmed in the Connect frontend code; the exact live `maxOutput` write payload is intentionally not marked validated until captured/tested against a real EV Station.
+
+## Set maximum output amperage
+
+**Validated on EV Station Lite.**
+
+```http
+PATCH /proxy/connect/api/v2/devices/{device_id}/status
+Content-Type: application/json
+X-CSRF-Token: <session token>
+```
+
+The action descriptor must come from the device's `type.supportedActions`. The action name observed for this control is `set_max_output_amp`:
+
+```json
+{
+  "id": "<device-specific-supported-action-id>",
+  "name": "set_max_output_amp",
+  "args": {
+    "maxOutput": 26
+  }
+}
+```
+
+The action UUID is device/runtime metadata and should **not** be hard-coded. Discover the matching action by name and reuse its returned `id`. The value is expressed in amps. The valid upper bound depends on the station/breaker configuration.

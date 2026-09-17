@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import (
     UniFiEVAuthError,
@@ -30,6 +31,23 @@ def _first(obj: dict[str, Any], *paths: tuple[str, ...]) -> Any:
             value = value[key]
         if value is not None:
             return value
+    return None
+
+
+def _find_key(value: Any, wanted: str) -> Any:
+    """Recursively return the first value for a key in nested API data."""
+    if isinstance(value, dict):
+        if wanted in value and value[wanted] is not None:
+            return value[wanted]
+        for child in value.values():
+            found = _find_key(child, wanted)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_key(child, wanted)
+            if found is not None:
+                return found
     return None
 
 
@@ -64,19 +82,40 @@ def summarize_history(
     ]
     rows.sort(key=lambda row: row.get("date") or 0, reverse=True)
 
-    now = datetime.now(timezone.utc).timestamp()
+    now_local = dt_util.now()
+    now_timestamp = now_local.timestamp()
 
     def energy_since(days: int) -> float:
-        cutoff = now - days * 86400
+        cutoff = now_timestamp - days * 86400
         return sum(
             float(row.get("powerUsage") or 0)
             for row in rows
             if float(row.get("date") or 0) >= cutoff
         )
 
+    def session_local_datetime(row: dict[str, Any]) -> datetime | None:
+        timestamp = float(row.get("date") or 0)
+        if timestamp <= 0:
+            return None
+        return dt_util.as_local(datetime.fromtimestamp(timestamp, tz=timezone.utc))
+
+    energy_today = 0.0
+    energy_month_to_date = 0.0
+    for row in rows:
+        session_dt = session_local_datetime(row)
+        if session_dt is None:
+            continue
+        energy = float(row.get("powerUsage") or 0)
+        if session_dt.date() == now_local.date():
+            energy_today += energy
+        if (session_dt.year, session_dt.month) == (now_local.year, now_local.month):
+            energy_month_to_date += energy
+
     return {
         "sessions": len(rows),
         "total_kwh": sum(float(row.get("powerUsage") or 0) for row in rows),
+        "energy_today": energy_today,
+        "energy_month_to_date": energy_month_to_date,
         "energy_7d": energy_since(7),
         "energy_30d": energy_since(30),
         "last": rows[0] if rows else None,
@@ -96,6 +135,7 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.entry = entry
         self._history: list[dict[str, Any]] = []
         self._history_updated: datetime | None = None
+        self._last_set_max_output: dict[str, int] = {}
 
         super().__init__(
             hass,
@@ -149,6 +189,7 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "power": latest,
                     "power_supported": power_supported,
                     "history": summarize_history(self._history, mac),
+                    "last_set_max_output": self._last_set_max_output.get(device_id),
                 }
 
             return result
@@ -157,7 +198,13 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except UniFiEVError as err:
             raise UpdateFailed(str(err)) from err
 
-    async def async_run_named_action(self, device_id: str, action_name: str) -> None:
+    async def async_run_named_action(
+        self,
+        device_id: str,
+        action_name: str,
+        *,
+        args: dict[str, Any] | None = None,
+    ) -> None:
         item = self.data.get(device_id) if self.data else None
         if not item:
             raise UniFiEVError(f"Unknown device {device_id}")
@@ -176,5 +223,7 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Device does not advertise supported action {action_name!r}"
             )
 
-        await self.client.run_action(device_id, action)
+        await self.client.run_action(device_id, action, args=args)
+        if action_name == "set_max_output_amp" and args and "maxOutput" in args:
+            self._last_set_max_output[device_id] = int(args["maxOutput"])
         await self.async_request_refresh()

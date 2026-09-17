@@ -185,13 +185,19 @@ class UniFiEVClient:
         )
         return self._extract_collection(payload)
 
-    async def run_action(self, device_id: str, action: dict[str, Any]) -> Any:
+    async def run_action(
+        self,
+        device_id: str,
+        action: dict[str, Any],
+        *,
+        args: dict[str, Any] | None = None,
+    ) -> Any:
         body = {
             key: value
             for key, value in action.items()
             if key in {"id", "name", "category"} and value is not None
         }
-        body["args"] = action.get("args") or {}
+        body["args"] = args if args is not None else (action.get("args") or {})
         return await self.request(
             "PATCH",
             f"{CONNECT_BASE}/devices/{device_id}/status",
