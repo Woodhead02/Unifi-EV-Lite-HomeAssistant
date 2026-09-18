@@ -137,6 +137,7 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._history_updated: datetime | None = None
         self._last_set_max_output: dict[str, int] = {}
         self._live_power: dict[str, dict[str, Any]] = {}
+        self._live_power_seen: dict[str, datetime] = {}
         self._websocket_task: asyncio.Task[None] | None = None
 
         super().__init__(
@@ -170,8 +171,27 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Live EV telemetry is delivered over the Connect WebSocket as
                 # EV_POWER_STATS. The Lite models return HTTP 400 for
                 # powerStats?current=true, so do not poll that endpoint here.
-                latest = self._live_power.get(device_id, {})
-                power_supported = bool(latest)
+                latest = dict(self._live_power.get(device_id, {}))
+                seen = self._live_power_seen.get(device_id)
+
+                # EV Station Lite only emits EV_POWER_STATS while actively
+                # streaming telemetry. Treat a known charger with no recent
+                # stream as idle (0 kW / 0 A) instead of unavailable. This
+                # also prevents stale non-zero readings if the stream ends
+                # without an explicit streaming=false frame.
+                if seen is None or now - seen >= timedelta(seconds=90):
+                    latest = {
+                        "instantKW": 0.0,
+                        "instantA": 0.0,
+                        "meter": 0.0,
+                        "duration": 0,
+                        "streaming": False,
+                    }
+                elif latest.get("streaming") is False:
+                    latest["instantKW"] = 0.0
+                    latest["instantA"] = 0.0
+
+                power_supported = True
 
                 mac = str(device.get("mac") or _first(device, ("shadow", "mac")) or "")
 
@@ -231,6 +251,7 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             telemetry["instantKW"] = 0
 
         self._live_power[device_id] = telemetry
+        self._live_power_seen[device_id] = datetime.now(timezone.utc)
 
         if not self.data or device_id not in self.data:
             return

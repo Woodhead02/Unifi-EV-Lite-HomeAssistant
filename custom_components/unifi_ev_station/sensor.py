@@ -32,12 +32,21 @@ class UniFiEVSensorDescription(SensorEntityDescription):
 
 def _status(item: dict[str, Any]) -> Any:
     device = item["device"]
-    return _first(
+    status = _first(
         device,
-        ("chargingStatus",),
         ("shadow", "chargingStatus"),
+        ("chargingStatus",),
         ("relayShadow", "chargingStatus"),
     )
+    if status is not None:
+        return status
+
+    # Connect's frontend reducer defaults a missing EV charging status to
+    # Available. While live telemetry is streaming we can safely report
+    # Charging even if the REST shadow omits chargingStatus.
+    if item.get("power", {}).get("streaming") is True:
+        return "Charging"
+    return "Available"
 
 
 

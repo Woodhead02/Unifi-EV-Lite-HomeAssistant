@@ -652,3 +652,10 @@ The write action remains `set_max_output_amp`. EV Station Lite firmware may not 
 ## Live power response shape
 
 EV Station Lite has been observed returning HTTP 400 for `powerStats?current=true`. Real-time measurements are delivered through the Connect WebSocket instead. Historical requests with `current=false` return interval samples.
+
+
+## Live telemetry behavior in Home Assistant
+
+EV Station Lite devices may only emit `EV_POWER_STATS` while a charging session is actively streaming. The integration therefore treats the absence of a recent telemetry event as an idle charger and reports 0 kW / 0 A. A 90-second staleness timeout prevents stale live readings from persisting after a stream ends.
+
+For charging status, the integration follows the Connect frontend behavior: it prefers `shadow.chargingStatus`, reports `Charging` while live telemetry is streaming, and falls back to `Available` when the REST shadow omits the status field.

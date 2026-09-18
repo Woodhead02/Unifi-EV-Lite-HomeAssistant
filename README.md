@@ -218,6 +218,12 @@ MIT
 
 ## Release notes
 
+### v0.1.7
+
+- Idle chargers now report **0 kW** and **0 A** instead of `Unknown`, keeping aggregate/combined power sensors stable.
+- Added a 90-second live-telemetry staleness guard so a charger cannot remain stuck at its last non-zero power reading after streaming stops.
+- Fixed **Charging status** so it reads `shadow.chargingStatus` when available, matches Connect's `Available` fallback when the field is absent, and reports `Charging` while live telemetry is actively streaming.
+
 ### v0.1.6
 
 - Moved real-time EV telemetry to the UniFi Connect WebSocket instead of the unsupported `powerStats?current=true` REST request.
