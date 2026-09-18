@@ -117,7 +117,7 @@ SENSORS = (
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=2,
-        value_fn=lambda i: _live_number(i, "meter"),
+        value_fn=lambda i: round(float(i.get("live_session_kwh") or 0.0), 3),
     ),
     UniFiEVSensorDescription(
         key="session_duration",
@@ -169,7 +169,7 @@ SENSORS = (
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=2,
-        value_fn=lambda i: round(i["history"]["energy_today"], 2),
+        value_fn=lambda i: round(float(i.get("energy_today_live", i["history"]["energy_today"])), 2),
     ),
     UniFiEVSensorDescription(
         key="energy_month_to_date",
@@ -178,7 +178,7 @@ SENSORS = (
         state_class=SensorStateClass.TOTAL,
         native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
         suggested_display_precision=2,
-        value_fn=lambda i: round(i["history"]["energy_month_to_date"], 2),
+        value_fn=lambda i: round(float(i.get("energy_month_to_date_live", i["history"]["energy_month_to_date"])), 2),
     ),
     UniFiEVSensorDescription(
         key="energy_7d",

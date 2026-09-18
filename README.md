@@ -218,6 +218,14 @@ MIT
 
 ## Release notes
 
+### v0.1.8
+
+- **Energy Today** now updates while a vehicle is actively charging instead of waiting for the session to finish.
+- **Energy Month to Date** now includes the current live charging session.
+- **Session energy** is driven by the live `EV_POWER_STATS.meter` value.
+- Added session reconciliation so the live meter is retained when charging stops and removed only after UniFi writes the completed session into `chargingHistory`. This prevents daily/monthly totals from temporarily dropping or double-counting at session completion.
+- Handles EV Station Lite behavior where the live telemetry stream may stop without an explicit `streaming=false` message.
+
 ### v0.1.7
 
 - Idle chargers now report **0 kW** and **0 A** instead of `Unknown`, keeping aggregate/combined power sensors stable.
