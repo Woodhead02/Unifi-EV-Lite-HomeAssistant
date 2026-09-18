@@ -8,6 +8,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -50,6 +51,47 @@ def _find_key(value: Any, wanted: str) -> Any:
                 return found
     return None
 
+
+
+
+def _session_period_contributions(session: dict[str, Any]) -> tuple[float, float]:
+    """Return live session energy attributable to today and this month.
+
+    UniFi's EV_POWER_STATS.meter is cumulative from the start of the charging
+    session. For sessions that cross a local day/month boundary we subtract the
+    meter value observed at that boundary, so Energy Today/MTD only include the
+    energy delivered inside the current period.
+    """
+    meter = max(float(session.get("meter") or 0.0), 0.0)
+    now_local = dt_util.now()
+    day_key = now_local.date().isoformat()
+    month_key = f"{now_local.year:04d}-{now_local.month:02d}"
+
+    if session.get("day_key") != day_key:
+        if session.get("ended"):
+            live_today = 0.0
+        else:
+            # If Home Assistant restarted after midnight during an already
+            # active session, we cannot reconstruct the pre-restart midnight
+            # meter exactly. Start the new day's contribution from the first
+            # meter we observe instead of incorrectly counting yesterday's use.
+            session["day_key"] = day_key
+            session["day_offset_meter"] = meter
+            live_today = 0.0
+    else:
+        live_today = max(meter - float(session.get("day_offset_meter") or 0.0), 0.0)
+
+    if session.get("month_key") != month_key:
+        if session.get("ended"):
+            live_month = 0.0
+        else:
+            session["month_key"] = month_key
+            session["month_offset_meter"] = meter
+            live_month = 0.0
+    else:
+        live_month = max(meter - float(session.get("month_offset_meter") or 0.0), 0.0)
+
+    return live_today, live_month
 
 def normalize_mac(value: str | None) -> str:
     return (value or "").replace(":", "").replace("-", "").lower()
@@ -142,6 +184,14 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # UniFi only writes a session to chargingHistory after it ends, so this
         # contribution is retained until completed history catches up.
         self._session_energy: dict[str, dict[str, Any]] = {}
+        # Persist the post-boundary portion of completed sessions that UniFi
+        # chargingHistory attributes entirely to the session's original date.
+        self._period_adjustments: dict[str, dict[str, Any]] = {}
+        self._period_store: Store[dict[str, Any]] = Store(
+            hass,
+            1,
+            f"{DOMAIN}.{entry.entry_id}.energy_period_adjustments",
+        )
         self._websocket_task: asyncio.Task[None] | None = None
 
         super().__init__(
@@ -153,6 +203,67 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 seconds=int(entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL))
             ),
         )
+
+    async def async_load_period_adjustments(self) -> None:
+        """Load persisted day/month split adjustments."""
+        stored = await self._period_store.async_load()
+        if isinstance(stored, dict):
+            self._period_adjustments = {
+                str(device_id): dict(values)
+                for device_id, values in stored.items()
+                if isinstance(values, dict)
+            }
+
+    async def _async_save_period_adjustments(self) -> None:
+        await self._period_store.async_save(self._period_adjustments)
+
+    def _period_adjustment(self, device_id: str) -> tuple[float, float]:
+        """Return persisted split energy for the current local day/month."""
+        values = self._period_adjustments.get(device_id, {})
+        now_local = dt_util.now()
+        day_key = now_local.date().isoformat()
+        month_key = f"{now_local.year:04d}-{now_local.month:02d}"
+        day_kwh = (
+            float(values.get("day_kwh") or 0.0)
+            if values.get("day_key") == day_key
+            else 0.0
+        )
+        month_kwh = (
+            float(values.get("month_kwh") or 0.0)
+            if values.get("month_key") == month_key
+            else 0.0
+        )
+        return day_kwh, month_kwh
+
+    def _record_completed_period_split(
+        self, device_id: str, session: dict[str, Any]
+    ) -> bool:
+        """Retain post-midnight/month energy after history absorbs a session."""
+        live_today, live_month = _session_period_contributions(session)
+        now_local = dt_util.now()
+        day_key = now_local.date().isoformat()
+        month_key = f"{now_local.year:04d}-{now_local.month:02d}"
+        values = self._period_adjustments.setdefault(device_id, {})
+        changed = False
+
+        # A non-zero offset means this session began before the current period.
+        # UniFi will place the whole completed history record on the old start
+        # date/month, so preserve only the portion delivered in this period.
+        if float(session.get("day_offset_meter") or 0.0) > 0 and live_today > 0:
+            if values.get("day_key") != day_key:
+                values["day_key"] = day_key
+                values["day_kwh"] = 0.0
+            values["day_kwh"] = float(values.get("day_kwh") or 0.0) + live_today
+            changed = True
+
+        if float(session.get("month_offset_meter") or 0.0) > 0 and live_month > 0:
+            if values.get("month_key") != month_key:
+                values["month_key"] = month_key
+                values["month_kwh"] = 0.0
+            values["month_kwh"] = float(values.get("month_kwh") or 0.0) + live_month
+            changed = True
+
+        return changed
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:
@@ -218,30 +329,25 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     history_gain = float(history["total_kwh"]) - baseline_total
                     threshold = min(max(meter * 0.50, 0.01), max(meter, 0.01))
                     if history_gain >= threshold:
+                        adjustment_changed = self._record_completed_period_split(
+                            device_id, pending
+                        )
                         self._session_energy.pop(device_id, None)
                         pending = None
+                        if adjustment_changed:
+                            await self._async_save_period_adjustments()
 
                 live_session_kwh = float(pending.get("meter") or 0.0) if pending else 0.0
-                live_started_at = int(pending.get("startedAt") or 0) if pending else 0
 
-                # Daily/monthly rollups use completed history plus the active
-                # (or just-ended, not-yet-persisted) session meter.  Match the
-                # completed-history semantics by assigning the session according
-                # to its start timestamp.
+                # EV_POWER_STATS.meter is cumulative from session start. For a
+                # session spanning midnight/month-end, only the meter delta since
+                # the local period boundary belongs in Energy Today/MTD.
                 live_today = 0.0
                 live_month = 0.0
-                if live_session_kwh > 0 and live_started_at > 0:
-                    started_local = dt_util.as_local(
-                        datetime.fromtimestamp(live_started_at, tz=timezone.utc)
-                    )
-                    now_local = dt_util.now()
-                    if started_local.date() == now_local.date():
-                        live_today = live_session_kwh
-                    if (started_local.year, started_local.month) == (
-                        now_local.year,
-                        now_local.month,
-                    ):
-                        live_month = live_session_kwh
+                if pending and live_session_kwh > 0:
+                    live_today, live_month = _session_period_contributions(pending)
+
+                day_adjustment, month_adjustment = self._period_adjustment(device_id)
 
                 result[device_id] = {
                     "device": device,
@@ -249,9 +355,15 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "power_supported": power_supported,
                     "history": history,
                     "live_session_kwh": live_session_kwh,
-                    "energy_today_live": float(history["energy_today"]) + live_today,
+                    "energy_today_live": (
+                        float(history["energy_today"])
+                        + day_adjustment
+                        + live_today
+                    ),
                     "energy_month_to_date_live": (
-                        float(history["energy_month_to_date"]) + live_month
+                        float(history["energy_month_to_date"])
+                        + month_adjustment
+                        + live_month
                     ),
                     "last_set_max_output": self._last_set_max_output.get(device_id),
                 }
@@ -327,24 +439,58 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             session is None
             or (started_at > 0 and int(session.get("startedAt") or 0) != started_at)
         )
+        now_local = dt_util.now()
+        current_day_key = now_local.date().isoformat()
+        current_month_key = f"{now_local.year:04d}-{now_local.month:02d}"
+
         if new_session and (streaming or (meter is not None and meter > 0)):
             baseline_total = 0.0
             if self.data and device_id in self.data:
                 baseline_total = float(
                     self.data[device_id].get("history", {}).get("total_kwh") or 0.0
                 )
+
+            initial_meter = meter or 0.0
+            started_local = (
+                dt_util.as_local(datetime.fromtimestamp(started_at, tz=timezone.utc))
+                if started_at > 0
+                else now_local
+            )
             session = {
-                "meter": meter or 0.0,
+                "meter": initial_meter,
                 "startedAt": started_at,
                 "baseline_total": baseline_total,
                 "ended": False,
+                "day_key": current_day_key,
+                "day_offset_meter": (
+                    0.0 if started_local.date() == now_local.date() else initial_meter
+                ),
+                "month_key": current_month_key,
+                "month_offset_meter": (
+                    0.0
+                    if (started_local.year, started_local.month)
+                    == (now_local.year, now_local.month)
+                    else initial_meter
+                ),
             }
             self._session_energy[device_id] = session
         elif session is not None:
+            previous_meter = float(session.get("meter") or 0.0)
+
+            # Snapshot the cumulative session meter at local day/month rollover.
+            # The next meter delta then belongs to the new period instead of
+            # being attributed entirely to the day/month when charging started.
+            if session.get("day_key") != current_day_key:
+                session["day_key"] = current_day_key
+                session["day_offset_meter"] = previous_meter
+            if session.get("month_key") != current_month_key:
+                session["month_key"] = current_month_key
+                session["month_offset_meter"] = previous_meter
+
             if meter is not None:
                 # The session meter should be monotonic; guard against a
                 # transient lower/empty frame.
-                session["meter"] = max(float(session.get("meter") or 0.0), meter)
+                session["meter"] = max(previous_meter, meter)
             if started_at > 0:
                 session["startedAt"] = started_at
 
@@ -363,26 +509,19 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             live_session_kwh = float(session.get("meter") or 0.0)
             item["live_session_kwh"] = live_session_kwh
 
-            started_at = int(session.get("startedAt") or 0)
-            live_today = 0.0
-            live_month = 0.0
-            if started_at > 0:
-                started_local = dt_util.as_local(
-                    datetime.fromtimestamp(started_at, tz=timezone.utc)
-                )
-                now_local = dt_util.now()
-                if started_local.date() == now_local.date():
-                    live_today = live_session_kwh
-                if (started_local.year, started_local.month) == (
-                    now_local.year,
-                    now_local.month,
-                ):
-                    live_month = live_session_kwh
+            live_today, live_month = _session_period_contributions(session)
 
             history = item.get("history", {})
-            item["energy_today_live"] = float(history.get("energy_today") or 0.0) + live_today
+            day_adjustment, month_adjustment = self._period_adjustment(device_id)
+            item["energy_today_live"] = (
+                float(history.get("energy_today") or 0.0)
+                + day_adjustment
+                + live_today
+            )
             item["energy_month_to_date_live"] = (
-                float(history.get("energy_month_to_date") or 0.0) + live_month
+                float(history.get("energy_month_to_date") or 0.0)
+                + month_adjustment
+                + live_month
             )
 
         updated[device_id] = item

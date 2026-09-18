@@ -134,7 +134,7 @@ The action UUID is obtained from the charger at runtime and is not hard-coded.
 
 Because the charging-history API is session-based:
 
-- A session that crosses midnight is attributed according to the timestamp UniFi records for that session rather than being split across calendar days.
+- Active sessions that cross local midnight are split at the boundary using the live session meter, so **Energy Today** starts from the post-midnight portion only. The same logic applies at month boundaries for **Energy Month to Date**.
 - An active charging session may not be included until UniFi writes the completed or updated session into charging history.
 
 These rollups are therefore best treated as UniFi session-history totals rather than utility-grade interval metering.
@@ -174,7 +174,7 @@ Historical charging and energy totals continue to come from the Connect REST API
 - UniFi Connect's EV Station API is undocumented and may change without notice.
 - Entity availability varies by model, firmware, and the actions/features advertised by UniFi Connect.
 - Maximum-output readback is incomplete on some EV Station Lite firmware even though the write action is available.
-- Energy Today and Month to Date are derived from session history, not sub-session interval metering.
+- Energy Today and Month to Date combine completed session history with the live session meter. Cross-midnight/month sessions are split from the first boundary observed while Home Assistant is running.
 - Charging-history freshness depends on when UniFi Connect records or updates a session.
 - Controls discovered from `type.supportedActions` should be considered experimental until tested across more device and firmware combinations.
 
@@ -218,12 +218,21 @@ MIT
 
 ## Release notes
 
-### v0.1.8
+### v1.0.1
 
-- **Energy Today** now updates while a vehicle is actively charging instead of waiting for the session to finish.
-- **Energy Month to Date** now includes the current live charging session.
+- Fixed **Energy Today** for charging sessions that cross local midnight.
+- Fixed **Energy Month to Date** for sessions that cross a month boundary.
+- Live session energy is now split using the cumulative WebSocket `meter` value observed at the day/month boundary instead of assigning the entire active session to its start date.
+- Preserves the post-boundary portion after UniFi moves the completed session into `chargingHistory`, preventing the daily total from dropping back to zero after session reconciliation.
+- Persists completed cross-boundary adjustments across Home Assistant restarts.
+
+### v1.0.0
+
+- First stable release, promoted from the proven v0.1.8 feature set.
+- **Energy Today** updates while a vehicle is actively charging instead of waiting for the session to finish.
+- **Energy Month to Date** includes the current live charging session.
 - **Session energy** is driven by the live `EV_POWER_STATS.meter` value.
-- Added session reconciliation so the live meter is retained when charging stops and removed only after UniFi writes the completed session into `chargingHistory`. This prevents daily/monthly totals from temporarily dropping or double-counting at session completion.
+- Added session reconciliation so the live meter is retained when charging stops and removed only after UniFi writes the completed session into `chargingHistory`.
 - Handles EV Station Lite behavior where the live telemetry stream may stop without an explicit `streaming=false` message.
 
 ### v0.1.7
