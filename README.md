@@ -208,6 +208,12 @@ MIT
 
 ## Release notes
 
+### v0.1.5
+
+- Fixed live **Power** and **Current** sensors showing `Unknown`.
+- Correctly handles the UniFi Connect `powerStats?current=true` response when `data` is a single live-sample object rather than a list.
+- Historical `powerStats?current=false` list responses remain supported.
+
 ### v0.1.4
 
 - Corrected **Maximum Output** limits to follow the EV Station breaker/output table: 20A→16A, 30A→24A, 40A→32A, 50A→40A, 60A→48A, 80A→64A, and 100A→80A.

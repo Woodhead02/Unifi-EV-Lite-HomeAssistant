@@ -169,7 +169,12 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     power_stats = await self.client.get_power_stats(
                         device_id, current=True
                     )
-                    latest = power_stats[-1] if power_stats else {}
+                    if isinstance(power_stats, dict):
+                        latest = power_stats
+                    elif isinstance(power_stats, list) and power_stats:
+                        latest = power_stats[-1]
+                    else:
+                        latest = {}
                     power_supported = True
                 except UniFiEVUnsupportedFeatureError:
                     # Some Connect EV devices expose charging history/status but do

@@ -608,3 +608,8 @@ The Home Assistant Maximum Output control follows the EV Station circuit-breaker
 | 100 A | 80 A | 19.2 kW |
 
 The write action remains `set_max_output_amp`. EV Station Lite firmware may not expose the configured setpoint in the polled `/devices` object, so the integration retains the last confirmed value locally in Home Assistant and restores it after restart.
+
+
+## Live power response shape
+
+For `GET /proxy/connect/api/v2/devices/{deviceId}/powerStats?interval=15m&current=true`, UniFi Connect may return `data` as a single object rather than an array. Example fields observed include `instantMA`, `instantMW`, and `dataTime`. Historical requests with `current=false` return a collection of interval samples.

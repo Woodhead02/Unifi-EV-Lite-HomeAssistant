@@ -169,13 +169,31 @@ class UniFiEVClient:
 
     async def get_power_stats(
         self, device_id: str, *, current: bool = True, interval: str = "15m"
-    ) -> list[dict[str, Any]]:
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        """Return Connect power statistics.
+
+        Connect uses two response shapes for this endpoint:
+        * current=false -> data is normally a list of interval samples
+        * current=true  -> data may be a single live sample object
+
+        Preserve both shapes instead of forcing everything through the
+        collection extractor.
+        """
         payload = await self.request(
             "GET",
             f"{CONNECT_BASE}/devices/{device_id}/powerStats",
             params={"interval": interval, "current": str(current).lower()},
         )
-        return self._extract_collection(payload)
+
+        data: Any = payload
+        if isinstance(payload, dict) and "data" in payload:
+            data = payload.get("data")
+
+        if isinstance(data, dict):
+            return data
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        return {}
 
     async def get_charging_history(self, limit: int = 1000) -> list[dict[str, Any]]:
         payload = await self.request(
