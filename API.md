@@ -247,6 +247,44 @@ The name `instantMW` is retained exactly as observed. Despite the name, observed
 
 Because this API is undocumented, applications should avoid treating this interpretation as revenue-grade metering without independent validation.
 
+
+### Live EV telemetry WebSocket
+
+Real-time EV Station Lite telemetry is pushed over:
+
+```text
+wss://<console>/proxy/connect/
+```
+
+The observed binary WebSocket message contains one or more records. Each record starts with an 8-byte envelope: one record-type byte, one encoding byte, and a 6-byte big-endian payload length, followed by a UTF-8 JSON payload.
+
+An observed event header:
+
+```json
+{
+  "name": "EV_POWER_STATS",
+  "timestamp": 1789698404000,
+  "type": "event"
+}
+```
+
+The following record contains charger telemetry such as:
+
+```json
+{
+  "id": "<device-id>",
+  "instantA": 47.49,
+  "instantKW": 11.42,
+  "instantV": 243,
+  "meter": 6.29,
+  "duration": 15727,
+  "startedAt": 1789682677,
+  "streaming": true
+}
+```
+
+The integration uses these fields for the live Current, Power, Voltage, Session energy, and Session duration entities. The WebSocket uses the same authenticated local UniFi OS session as the REST API.
+
 ## Charging history
 
 ### Request
@@ -547,6 +585,7 @@ This API is not guaranteed stable. When reporting a change, include:
 | `POST /api/auth/login` | Used by integration |
 | `GET /proxy/connect/api/v2/devices` | Used by integration |
 | `GET /proxy/connect/api/v2/devices/{id}/powerStats` | Tested/used |
+| `wss://<console>/proxy/connect/` (`EV_POWER_STATS`) | Tested/used for live telemetry |
 | `GET /proxy/connect/api/v2/stats/evs/chargingHistory` | Tested/used |
 | `PATCH /proxy/connect/api/v2/devices/{id}/status` | Tested; `enable_charging` confirmed |
 | `GET .../chargingHistory/export` | Found in frontend code |
@@ -612,4 +651,4 @@ The write action remains `set_max_output_amp`. EV Station Lite firmware may not 
 
 ## Live power response shape
 
-For `GET /proxy/connect/api/v2/devices/{deviceId}/powerStats?interval=15m&current=true`, UniFi Connect may return `data` as a single object rather than an array. Example fields observed include `instantMA`, `instantMW`, and `dataTime`. Historical requests with `current=false` return a collection of interval samples.
+EV Station Lite has been observed returning HTTP 400 for `powerStats?current=true`. Real-time measurements are delivered through the Connect WebSocket instead. Historical requests with `current=false` return interval samples.

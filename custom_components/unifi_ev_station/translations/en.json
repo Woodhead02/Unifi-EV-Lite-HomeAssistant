@@ -58,6 +58,15 @@
       },
       "energy_month_to_date": {
         "name": "Energy month to date"
+      },
+      "voltage": {
+        "name": "Voltage"
+      },
+      "session_energy": {
+        "name": "Session energy"
+      },
+      "session_duration": {
+        "name": "Session duration"
       }
     },
     "switch": {

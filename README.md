@@ -6,17 +6,31 @@ A local Home Assistant custom integration for UniFi Connect EV Stations managed 
 
 ## Features
 
-- Authenticates directly to a local UniFi OS console with a local UniFi account.
-- Uses the UniFi OS session cookie and CSRF-token flow used by the local console.
-- Discovers UniFi Connect EV Stations automatically.
-- Reads live charging power and current when the charger supports UniFi Connect Power Insight.
-- Reads charging-session history and exposes per-charger energy/session statistics.
-- Exposes charging status.
-- Provides daily and month-to-date energy rollups from charging history.
-- Creates an **Allow charging** switch when the charger advertises the relevant supported actions.
-- Creates a writable **Maximum output** control when the charger advertises the `set_max_output_amp` action.
-- Uses the supported-action descriptors returned by UniFi instead of hard-coding per-device action UUIDs.
-- Continues loading devices that do not support the optional `powerStats` endpoint.
+Bring your UniFi EV chargers into Home Assistant with useful energy tracking and everyday charging controls.
+
+- **See live charging activity** — view current power draw, amperage, and charging status while a vehicle is charging.
+- **Track energy use over time** — see energy used today, month to date, over the last 7 days, over the last 30 days, and across recorded charging history.
+- **Review charging sessions** — see the most recent session energy use and charging time, plus the total number of recorded sessions.
+- **Control whether charging is allowed** — enable or disable charging directly from Home Assistant when supported by the charger.
+- **Adjust charging amperage** — change the charger's maximum output from Home Assistant, with limits based on the configured circuit breaker.
+- **Manage multiple chargers** — chargers are discovered automatically and appear as separate Home Assistant devices.
+- **Works locally** — Home Assistant connects directly to your UniFi console on your local network; no UI.com cloud connection is required for normal operation.
+- **Handles model differences gracefully** — features that are not supported by a particular charger are simply left unavailable instead of preventing the integration from loading.
+
+### What this looks like in Home Assistant
+
+For each supported charger, you can build dashboards and automations around information such as:
+
+- Live charging power, current, and voltage
+- Charging status
+- Energy used today
+- Energy used this month
+- Recent and historical charging energy
+- Last charging-session energy and duration
+- Charging enable/disable
+- Maximum charging amperage
+
+This makes it possible to build automations such as lowering charging current during peak demand, disabling charging on a schedule, or tracking EV charging energy separately from the rest of the home.
 
 ## Home Assistant entities
 
@@ -24,8 +38,11 @@ Per detected charger, the integration currently creates the following entities w
 
 ### Live telemetry
 
-- **Power** — current charging power in kW.
-- **Current** — current draw in A.
+- **Power** — live charging power in kW.
+- **Current** — live current draw in A.
+- **Voltage** — live charging voltage.
+- **Session energy** — live energy meter reported during the active charging session.
+- **Session duration** — live session duration reported by the charger.
 - **Charging status** — current UniFi charging state.
 
 ### Energy and session statistics
@@ -146,23 +163,16 @@ Some EV Station Lite firmware does not expose the current maximum-output value i
 
 If UniFi exposes a reliable readback field in a future firmware/API version, the integration can be updated to use it.
 
-## Power Insight support
+## Live telemetry
 
-Not every EV Station exposes the Connect `powerStats` endpoint.
+Live charging measurements come from the local UniFi Connect WebSocket, the same event stream used by the Connect interface. This provides push updates for power, current, voltage, session energy, and session duration while the charger is streaming telemetry.
 
-If UniFi returns an error such as:
-
-```text
-device does not support power insight
-```
-
-the integration will continue to load that charger. The **Power** and **Current** sensors will simply be unavailable while charging history, status, energy rollups, and supported controls continue to work.
+Historical charging and energy totals continue to come from the Connect REST API. No cloud polling is required.
 
 ## Known limitations
 
 - UniFi Connect's EV Station API is undocumented and may change without notice.
 - Entity availability varies by model, firmware, and the actions/features advertised by UniFi Connect.
-- Live Power and Current require Connect Power Insight support on the device.
 - Maximum-output readback is incomplete on some EV Station Lite firmware even though the write action is available.
 - Energy Today and Month to Date are derived from session history, not sub-session interval metering.
 - Charging-history freshness depends on when UniFi Connect records or updates a session.
@@ -208,10 +218,17 @@ MIT
 
 ## Release notes
 
+### v0.1.6
+
+- Moved real-time EV telemetry to the UniFi Connect WebSocket instead of the unsupported `powerStats?current=true` REST request.
+- Fixed live **Power** and **Current** remaining `Unknown` on EV Station Lite.
+- Added live **Voltage**.
+- Added live **Session energy** and **Session duration** from `EV_POWER_STATS` events.
+- Added automatic WebSocket reconnect behavior while keeping REST polling for device metadata, history, and controls.
+
 ### v0.1.5
 
-- Fixed live **Power** and **Current** sensors showing `Unknown`.
-- Correctly handles the UniFi Connect `powerStats?current=true` response when `data` is a single live-sample object rather than a list.
+- Attempted support for a `powerStats?current=true` live-sample response shape. EV Station Lite was later confirmed to reject this request with HTTP 400; v0.1.6 replaces this approach with the Connect WebSocket.
 - Historical `powerStats?current=false` list responses remain supported.
 
 ### v0.1.4

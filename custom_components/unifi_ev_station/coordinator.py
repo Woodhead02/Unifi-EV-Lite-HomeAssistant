@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any
@@ -14,7 +15,6 @@ from .api import (
     UniFiEVAuthError,
     UniFiEVClient,
     UniFiEVError,
-    UniFiEVUnsupportedFeatureError,
 )
 from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
 
@@ -136,6 +136,8 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._history: list[dict[str, Any]] = []
         self._history_updated: datetime | None = None
         self._last_set_max_output: dict[str, int] = {}
+        self._live_power: dict[str, dict[str, Any]] = {}
+        self._websocket_task: asyncio.Task[None] | None = None
 
         super().__init__(
             hass,
@@ -165,27 +167,11 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if not device_id:
                     continue
 
-                try:
-                    power_stats = await self.client.get_power_stats(
-                        device_id, current=True
-                    )
-                    if isinstance(power_stats, dict):
-                        latest = power_stats
-                    elif isinstance(power_stats, list) and power_stats:
-                        latest = power_stats[-1]
-                    else:
-                        latest = {}
-                    power_supported = True
-                except UniFiEVUnsupportedFeatureError:
-                    # Some Connect EV devices expose charging history/status but do
-                    # not implement the optional powerStats / power insight API.
-                    # Do not fail the whole integration because one device lacks it.
-                    _LOGGER.debug(
-                        "Device %s does not support Connect power insight",
-                        device_id,
-                    )
-                    latest = {}
-                    power_supported = False
+                # Live EV telemetry is delivered over the Connect WebSocket as
+                # EV_POWER_STATS. The Lite models return HTTP 400 for
+                # powerStats?current=true, so do not poll that endpoint here.
+                latest = self._live_power.get(device_id, {})
+                power_supported = bool(latest)
 
                 mac = str(device.get("mac") or _first(device, ("shadow", "mac")) or "")
 
@@ -202,6 +188,59 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ConfigEntryAuthFailed from err
         except UniFiEVError as err:
             raise UpdateFailed(str(err)) from err
+
+    async def async_start_websocket(self) -> None:
+        """Start the background EV telemetry listener."""
+        if self._websocket_task and not self._websocket_task.done():
+            return
+        self._websocket_task = self.hass.async_create_task(
+            self.client.listen_ev_power_stats(self._async_handle_power_event),
+            "UniFi EV Station telemetry",
+        )
+
+    async def async_stop_websocket(self) -> None:
+        """Stop the background EV telemetry listener."""
+        if self._websocket_task is None:
+            return
+        self._websocket_task.cancel()
+        try:
+            await self._websocket_task
+        except asyncio.CancelledError:
+            pass
+        self._websocket_task = None
+
+    async def _async_handle_power_event(self, event: dict[str, Any]) -> None:
+        """Apply one EV_POWER_STATS WebSocket event to coordinator data."""
+        device_id = str(event.get("id") or "")
+        if not device_id:
+            event_mac = normalize_mac(str(event.get("mac") or ""))
+            if self.data and event_mac:
+                for candidate_id, item in self.data.items():
+                    device_mac = normalize_mac(
+                        str(item["device"].get("mac") or _first(item["device"], ("shadow", "mac")) or "")
+                    )
+                    if device_mac == event_mac:
+                        device_id = candidate_id
+                        break
+        if not device_id:
+            return
+
+        telemetry = dict(event)
+        if telemetry.get("streaming") is False:
+            telemetry["instantA"] = 0
+            telemetry["instantKW"] = 0
+
+        self._live_power[device_id] = telemetry
+
+        if not self.data or device_id not in self.data:
+            return
+
+        updated = dict(self.data)
+        item = dict(updated[device_id])
+        item["power"] = telemetry
+        item["power_supported"] = True
+        updated[device_id] = item
+        self.async_set_updated_data(updated)
 
     async def async_run_named_action(
         self,

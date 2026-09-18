@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import inspect
 import json
+import logging
+from collections.abc import Callable
 from typing import Any
 
-from aiohttp import ClientResponse, ClientSession
+from aiohttp import (
+    ClientResponse,
+    ClientSession,
+    WSMsgType,
+    WSServerHandshakeError,
+)
 
 from .const import CONNECT_BASE
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class UniFiEVError(Exception):
@@ -65,7 +76,6 @@ class UniFiEVClient:
             self.csrf_token = token
             return
 
-        # Fallback: current UniFi OS TOKEN/UOS_TOKEN JWTs commonly carry csrfToken.
         cookies = self.session.cookie_jar.filter_cookies(self.host)
         for name in ("TOKEN", "UOS_TOKEN"):
             morsel = cookies.get(name)
@@ -75,7 +85,6 @@ class UniFiEVClient:
 
     async def login(self) -> None:
         """Authenticate with a local UniFi OS account."""
-        # Seed any initial CSRF state exposed by the console shell.
         async with self.session.get(self.host, allow_redirects=False) as response:
             self._update_csrf(response)
             await response.read()
@@ -136,9 +145,7 @@ class UniFiEVClient:
             if response.status == 401 and retry_auth:
                 self._logged_in = False
                 await self.login()
-                return await self.request(
-                    method, path, retry_auth=False, **kwargs
-                )
+                return await self.request(method, path, retry_auth=False, **kwargs)
             if response.status == 401:
                 raise UniFiEVAuthError("UniFi OS session is not authenticated")
             if response.status == 403:
@@ -168,17 +175,9 @@ class UniFiEVClient:
         return self._extract_collection(payload)
 
     async def get_power_stats(
-        self, device_id: str, *, current: bool = True, interval: str = "15m"
+        self, device_id: str, *, current: bool = False, interval: str = "15m"
     ) -> dict[str, Any] | list[dict[str, Any]]:
-        """Return Connect power statistics.
-
-        Connect uses two response shapes for this endpoint:
-        * current=false -> data is normally a list of interval samples
-        * current=true  -> data may be a single live sample object
-
-        Preserve both shapes instead of forcing everything through the
-        collection extractor.
-        """
+        """Return historical Connect power statistics when supported."""
         payload = await self.request(
             "GET",
             f"{CONNECT_BASE}/devices/{device_id}/powerStats",
@@ -221,6 +220,154 @@ class UniFiEVClient:
             f"{CONNECT_BASE}/devices/{device_id}/status",
             json=body,
         )
+
+    @property
+    def websocket_url(self) -> str:
+        """Return the local Connect WebSocket endpoint."""
+        if self.host.startswith("https://"):
+            base = "wss://" + self.host[len("https://") :]
+        elif self.host.startswith("http://"):
+            base = "ws://" + self.host[len("http://") :]
+        else:
+            base = self.host
+        return f"{base}/proxy/connect/"
+
+    @staticmethod
+    def decode_websocket_records(data: bytes) -> list[Any]:
+        """Decode UniFi Connect's binary record envelope.
+
+        Observed framing is an 8-byte header followed by a payload:
+        byte 0: record kind, byte 1: encoding, bytes 2-7: big-endian length.
+        JSON records use encoding 1.
+        """
+        records: list[Any] = []
+        offset = 0
+        while offset + 8 <= len(data):
+            _kind = data[offset]
+            _encoding = data[offset + 1]
+            length = int.from_bytes(data[offset + 2 : offset + 8], "big")
+            offset += 8
+            if length < 0 or offset + length > len(data):
+                _LOGGER.debug("Ignoring malformed Connect WebSocket record")
+                break
+            payload = data[offset : offset + length]
+            offset += length
+            try:
+                records.append(json.loads(payload.decode("utf-8")))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                _LOGGER.debug("Ignoring non-JSON Connect WebSocket record")
+        return records
+
+    @staticmethod
+    def extract_ev_power_events(records: list[Any]) -> list[dict[str, Any]]:
+        """Extract EV power-stat payloads from decoded WebSocket records."""
+        events: list[dict[str, Any]] = []
+        names = {"EV_POWER_STATS", "MULTI_EV_POWER_STATS", "WS_MULTI_EV_POWER_STATS"}
+
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            if record.get("type") != "event" or record.get("name") not in names:
+                continue
+            if index + 1 >= len(records):
+                continue
+
+            payload = records[index + 1]
+            if isinstance(payload, dict):
+                # Some envelopes wrap event data in a data property.
+                nested = payload.get("data")
+                if isinstance(nested, dict):
+                    events.append(nested)
+                elif isinstance(nested, list):
+                    events.extend(item for item in nested if isinstance(item, dict))
+                else:
+                    events.append(payload)
+            elif isinstance(payload, list):
+                events.extend(item for item in payload if isinstance(item, dict))
+
+        return events
+
+    async def listen_ev_power_stats(
+        self,
+        callback: Callable[[dict[str, Any]], Any],
+    ) -> None:
+        """Maintain the Connect WebSocket and emit EV_POWER_STATS events.
+
+        This coroutine is intended to run as a Home Assistant background task.
+        It reconnects automatically until cancelled.
+        """
+        backoff = 2
+        while True:
+            try:
+                if not self._logged_in:
+                    await self.login()
+
+                async with self.session.ws_connect(
+                    self.websocket_url,
+                    origin=self.host,
+                    heartbeat=30,
+                    autoping=True,
+                    autoclose=True,
+                ) as websocket:
+                    _LOGGER.debug("Connected to UniFi Connect EV telemetry WebSocket")
+                    backoff = 2
+
+                    async for message in websocket:
+                        events: list[dict[str, Any]] = []
+                        if message.type == WSMsgType.BINARY:
+                            records = self.decode_websocket_records(message.data)
+                            events = self.extract_ev_power_events(records)
+                        elif message.type == WSMsgType.TEXT:
+                            try:
+                                decoded = json.loads(message.data)
+                            except json.JSONDecodeError:
+                                decoded = None
+                            if isinstance(decoded, dict):
+                                if decoded.get("name") in {
+                                    "EV_POWER_STATS",
+                                    "MULTI_EV_POWER_STATS",
+                                    "WS_MULTI_EV_POWER_STATS",
+                                }:
+                                    payload = decoded.get("data")
+                                    if isinstance(payload, dict):
+                                        events = [payload]
+                                    elif isinstance(payload, list):
+                                        events = [
+                                            item
+                                            for item in payload
+                                            if isinstance(item, dict)
+                                        ]
+                        elif message.type in (
+                            WSMsgType.CLOSE,
+                            WSMsgType.CLOSED,
+                            WSMsgType.ERROR,
+                        ):
+                            break
+
+                        for event in events:
+                            result = callback(event)
+                            if inspect.isawaitable(result):
+                                await result
+
+            except asyncio.CancelledError:
+                raise
+            except WSServerHandshakeError as err:
+                if err.status in (401, 403):
+                    self._logged_in = False
+                _LOGGER.warning(
+                    "UniFi Connect telemetry WebSocket handshake failed (HTTP %s); retrying",
+                    err.status,
+                )
+            except (UniFiEVError, OSError) as err:
+                _LOGGER.warning(
+                    "UniFi Connect telemetry WebSocket disconnected: %s; retrying",
+                    err,
+                )
+            except Exception:
+                _LOGGER.exception("Unexpected UniFi Connect telemetry WebSocket error")
+
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30)
 
     @staticmethod
     def _extract_collection(payload: Any) -> list[dict[str, Any]]:
