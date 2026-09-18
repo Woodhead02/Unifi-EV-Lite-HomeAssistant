@@ -668,8 +668,8 @@ UniFi Connect does not add an active charging session to `chargingHistory` until
 Home Assistant therefore calculates the user-facing rollups as follows while a session is active:
 
 ```text
-Energy Today = completed chargingHistory energy for today + active session meter
-Energy Month to Date = completed chargingHistory energy for the month + active session meter
+Energy Today = completed chargingHistory energy for today + persisted cross-midnight adjustment + current-session meter delta since local midnight
+Energy Month to Date = completed chargingHistory energy for the month + persisted cross-month adjustment + current-session meter delta since the local month boundary
 ```
 
 When the live stream ends, the integration retains the final session meter until the completed session appears in `chargingHistory`. Once the per-device history total increases, the temporary live contribution is removed in the same coordinator update. This avoids both a temporary drop to the completed-history-only value and double counting after UniFi persists the session.
