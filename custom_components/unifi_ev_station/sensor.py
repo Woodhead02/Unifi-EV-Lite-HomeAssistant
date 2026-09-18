@@ -20,6 +20,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import UniFiEVCoordinator, _first
 from .entity import UniFiEVEntity
@@ -205,11 +206,18 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     coordinator: UniFiEVCoordinator = entry.runtime_data
-    async_add_entities(
+    entities = [
         UniFiEVSensor(coordinator, device_id, description)
         for device_id in coordinator.data
         for description in SENSORS
+    ]
+    entities.extend(
+        [
+            UniFiEVSiteEnergyTodaySensor(coordinator),
+            UniFiEVSiteEnergyMonthToDateSensor(coordinator),
+        ]
     )
+    async_add_entities(entities)
 
 
 class UniFiEVSensor(UniFiEVEntity, SensorEntity):
@@ -227,3 +235,41 @@ class UniFiEVSensor(UniFiEVEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         return self.entity_description.value_fn(self.item)
+
+
+class _UniFiEVSiteEnergySensor(CoordinatorEntity[UniFiEVCoordinator], SensorEntity):
+    _attr_has_entity_name = False
+    _attr_device_class = SensorDeviceClass.ENERGY
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_suggested_display_precision = 2
+
+    def __init__(self, coordinator: UniFiEVCoordinator, key: str, name: str) -> None:
+        super().__init__(coordinator)
+        self._key = key
+        self._attr_name = name
+        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{key}"
+
+    @property
+    def native_value(self) -> float:
+        return round(
+            sum(
+                float(item.get(self._key, 0.0) or 0.0)
+                for item in self.coordinator.data.values()
+            ),
+            2,
+        )
+
+
+class UniFiEVSiteEnergyTodaySensor(_UniFiEVSiteEnergySensor):
+    def __init__(self, coordinator: UniFiEVCoordinator) -> None:
+        super().__init__(coordinator, "energy_today_live", "EV Energy Today")
+
+
+class UniFiEVSiteEnergyMonthToDateSensor(_UniFiEVSiteEnergySensor):
+    def __init__(self, coordinator: UniFiEVCoordinator) -> None:
+        super().__init__(
+            coordinator,
+            "energy_month_to_date_live",
+            "EV Energy Month to Date",
+        )
