@@ -659,19 +659,3 @@ EV Station Lite has been observed returning HTTP 400 for `powerStats?current=tru
 EV Station Lite devices may only emit `EV_POWER_STATS` while a charging session is actively streaming. The integration therefore treats the absence of a recent telemetry event as an idle charger and reports 0 kW / 0 A. A 90-second staleness timeout prevents stale live readings from persisting after a stream ends.
 
 For charging status, the integration follows the Connect frontend behavior: it prefers `shadow.chargingStatus`, reports `Charging` while live telemetry is streaming, and falls back to `Available` when the REST shadow omits the status field.
-
-
-## Live energy rollups
-
-UniFi Connect does not add an active charging session to `chargingHistory` until the session has completed. The `EV_POWER_STATS` WebSocket event contains a `meter` value that has been observed increasing throughout the active charging session and is used by the integration as live session energy in kWh.
-
-Home Assistant therefore calculates the user-facing rollups as follows while a session is active:
-
-```text
-Energy Today = completed chargingHistory energy for today + active session meter
-Energy Month to Date = completed chargingHistory energy for the month + active session meter
-```
-
-When the live stream ends, the integration retains the final session meter until the completed session appears in `chargingHistory`. Once the per-device history total increases, the temporary live contribution is removed in the same coordinator update. This avoids both a temporary drop to the completed-history-only value and double counting after UniFi persists the session.
-
-EV Station Lite may stop emitting `EV_POWER_STATS` without an explicit `streaming=false` event, so the same telemetry staleness timeout used for idle power/current also marks the retained live session as ended for reconciliation.

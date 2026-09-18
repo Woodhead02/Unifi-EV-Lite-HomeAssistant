@@ -10,7 +10,6 @@ Bring your UniFi EV chargers into Home Assistant with useful energy tracking and
 
 - **See live charging activity** — view current power draw, amperage, and charging status while a vehicle is charging.
 - **Track energy use over time** — see energy used today, month to date, over the last 7 days, over the last 30 days, and across recorded charging history.
-- **See whole-home EV totals** — combined EV Energy Today and EV Energy Month to Date sensors automatically add all discovered chargers together.
 - **Review charging sessions** — see the most recent session energy use and charging time, plus the total number of recorded sessions.
 - **Control whether charging is allowed** — enable or disable charging directly from Home Assistant when supported by the charger.
 - **Adjust charging amperage** — change the charger's maximum output from Home Assistant, with limits based on the configured circuit breaker.
@@ -56,13 +55,6 @@ Per detected charger, the integration currently creates the following entities w
 - **Energy Month to Date** — charging energy attributed to the current local calendar month.
 - **Energy in the last 7 days** — rolling 7-day charging energy.
 - **Energy in the last 30 days** — rolling 30-day charging energy.
-
-### Combined EV totals
-
-- **EV Energy Today** — sum of every charger's Energy Today value.
-- **EV Energy Month to Date** — sum of every charger's Energy Month to Date value.
-
-These are integration-wide sensors, so they can be used directly in dashboards and history graphs without creating a Home Assistant helper.
 
 ### Controls
 
@@ -225,21 +217,6 @@ The repository includes GitHub Actions for:
 MIT
 
 ## Release notes
-
-### v0.1.9
-
-- Added **EV Energy Today**, a site-level sensor that sums the existing per-charger Energy Today values.
-- Added **EV Energy Month to Date**, a site-level sensor that sums the existing per-charger month-to-date values.
-- Combined totals automatically include live in-progress session energy because they are derived from the same per-charger sensors.
-- No Home Assistant template/helper is required to get a whole-site EV daily or monthly total.
-
-### v0.1.8
-
-- **Energy Today** now updates while a vehicle is actively charging instead of waiting for the session to finish.
-- **Energy Month to Date** now includes the current live charging session.
-- **Session energy** is driven by the live `EV_POWER_STATS.meter` value.
-- Added session reconciliation so the live meter is retained when charging stops and removed only after UniFi writes the completed session into `chargingHistory`. This prevents daily/monthly totals from temporarily dropping or double-counting at session completion.
-- Handles EV Station Lite behavior where the live telemetry stream may stop without an explicit `streaming=false` message.
 
 ### v0.1.7
 
