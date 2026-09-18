@@ -138,10 +138,6 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_set_max_output: dict[str, int] = {}
         self._live_power: dict[str, dict[str, Any]] = {}
         self._live_power_seen: dict[str, datetime] = {}
-        # Tracks the live session meter separately from instantaneous telemetry.
-        # UniFi only writes a session to chargingHistory after it ends, so this
-        # contribution is retained until completed history catches up.
-        self._session_energy: dict[str, dict[str, Any]] = {}
         self._websocket_task: asyncio.Task[None] | None = None
 
         super().__init__(
@@ -191,13 +187,6 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "duration": 0,
                         "streaming": False,
                     }
-                    # EV Station Lite may simply stop emitting EV_POWER_STATS
-                    # instead of sending an explicit streaming=false frame.
-                    # Mark the retained session meter as ended after the same
-                    # staleness window so it can be reconciled with history.
-                    pending_session = self._session_energy.get(device_id)
-                    if pending_session is not None:
-                        pending_session["ended"] = True
                 elif latest.get("streaming") is False:
                     latest["instantKW"] = 0.0
                     latest["instantA"] = 0.0
@@ -205,54 +194,12 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 power_supported = True
 
                 mac = str(device.get("mac") or _first(device, ("shadow", "mac")) or "")
-                history = summarize_history(self._history, mac)
-
-                pending = self._session_energy.get(device_id)
-                if pending and pending.get("ended"):
-                    # Once completed charging history increases beyond the
-                    # per-device baseline captured for this session, UniFi has
-                    # persisted the session. Drop the temporary live meter in
-                    # the same coordinator update so it is never double-counted.
-                    baseline_total = float(pending.get("baseline_total") or 0.0)
-                    meter = float(pending.get("meter") or 0.0)
-                    history_gain = float(history["total_kwh"]) - baseline_total
-                    threshold = min(max(meter * 0.50, 0.01), max(meter, 0.01))
-                    if history_gain >= threshold:
-                        self._session_energy.pop(device_id, None)
-                        pending = None
-
-                live_session_kwh = float(pending.get("meter") or 0.0) if pending else 0.0
-                live_started_at = int(pending.get("startedAt") or 0) if pending else 0
-
-                # Daily/monthly rollups use completed history plus the active
-                # (or just-ended, not-yet-persisted) session meter.  Match the
-                # completed-history semantics by assigning the session according
-                # to its start timestamp.
-                live_today = 0.0
-                live_month = 0.0
-                if live_session_kwh > 0 and live_started_at > 0:
-                    started_local = dt_util.as_local(
-                        datetime.fromtimestamp(live_started_at, tz=timezone.utc)
-                    )
-                    now_local = dt_util.now()
-                    if started_local.date() == now_local.date():
-                        live_today = live_session_kwh
-                    if (started_local.year, started_local.month) == (
-                        now_local.year,
-                        now_local.month,
-                    ):
-                        live_month = live_session_kwh
 
                 result[device_id] = {
                     "device": device,
                     "power": latest,
                     "power_supported": power_supported,
-                    "history": history,
-                    "live_session_kwh": live_session_kwh,
-                    "energy_today_live": float(history["energy_today"]) + live_today,
-                    "energy_month_to_date_live": (
-                        float(history["energy_month_to_date"]) + live_month
-                    ),
+                    "history": summarize_history(self._history, mac),
                     "last_set_max_output": self._last_set_max_output.get(device_id),
                 }
 
@@ -299,57 +246,12 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         telemetry = dict(event)
-        streaming = telemetry.get("streaming") is True
         if telemetry.get("streaming") is False:
             telemetry["instantA"] = 0
             telemetry["instantKW"] = 0
 
         self._live_power[device_id] = telemetry
         self._live_power_seen[device_id] = datetime.now(timezone.utc)
-
-        # EV_POWER_STATS.meter is the live energy delivered for the current
-        # charging session. Keep it independently from instantaneous telemetry
-        # because EV Station Lite stops emitting the stream before
-        # chargingHistory necessarily contains the completed session.
-        meter_raw = telemetry.get("meter")
-        started_raw = telemetry.get("startedAt")
-        try:
-            meter = max(float(meter_raw), 0.0) if meter_raw is not None else None
-        except (TypeError, ValueError):
-            meter = None
-        try:
-            started_at = int(started_raw) if started_raw is not None else 0
-        except (TypeError, ValueError):
-            started_at = 0
-
-        session = self._session_energy.get(device_id)
-        new_session = (
-            session is None
-            or (started_at > 0 and int(session.get("startedAt") or 0) != started_at)
-        )
-        if new_session and (streaming or (meter is not None and meter > 0)):
-            baseline_total = 0.0
-            if self.data and device_id in self.data:
-                baseline_total = float(
-                    self.data[device_id].get("history", {}).get("total_kwh") or 0.0
-                )
-            session = {
-                "meter": meter or 0.0,
-                "startedAt": started_at,
-                "baseline_total": baseline_total,
-                "ended": False,
-            }
-            self._session_energy[device_id] = session
-        elif session is not None:
-            if meter is not None:
-                # The session meter should be monotonic; guard against a
-                # transient lower/empty frame.
-                session["meter"] = max(float(session.get("meter") or 0.0), meter)
-            if started_at > 0:
-                session["startedAt"] = started_at
-
-        if session is not None:
-            session["ended"] = not streaming
 
         if not self.data or device_id not in self.data:
             return
@@ -358,33 +260,6 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         item = dict(updated[device_id])
         item["power"] = telemetry
         item["power_supported"] = True
-
-        if session is not None:
-            live_session_kwh = float(session.get("meter") or 0.0)
-            item["live_session_kwh"] = live_session_kwh
-
-            started_at = int(session.get("startedAt") or 0)
-            live_today = 0.0
-            live_month = 0.0
-            if started_at > 0:
-                started_local = dt_util.as_local(
-                    datetime.fromtimestamp(started_at, tz=timezone.utc)
-                )
-                now_local = dt_util.now()
-                if started_local.date() == now_local.date():
-                    live_today = live_session_kwh
-                if (started_local.year, started_local.month) == (
-                    now_local.year,
-                    now_local.month,
-                ):
-                    live_month = live_session_kwh
-
-            history = item.get("history", {})
-            item["energy_today_live"] = float(history.get("energy_today") or 0.0) + live_today
-            item["energy_month_to_date_live"] = (
-                float(history.get("energy_month_to_date") or 0.0) + live_month
-            )
-
         updated[device_id] = item
         self.async_set_updated_data(updated)
 
