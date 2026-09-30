@@ -378,7 +378,11 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Start the background EV telemetry listener."""
         if self._websocket_task and not self._websocket_task.done():
             return
-        self._websocket_task = self.hass.async_create_task(
+        # The telemetry listener runs for the lifetime of the entry. Start it as
+        # a background task so Home Assistant does not wait on it during
+        # startup, and so the config entry cancels it automatically on unload.
+        self._websocket_task = self.entry.async_create_background_task(
+            self.hass,
             self.client.listen_ev_power_stats(self._async_handle_power_event),
             "UniFi EV Station telemetry",
         )

@@ -67,6 +67,9 @@
       },
       "session_duration": {
         "name": "Session duration"
+      },
+      "raw_charging_status": {
+        "name": "Charging status (raw)"
       }
     },
     "switch": {

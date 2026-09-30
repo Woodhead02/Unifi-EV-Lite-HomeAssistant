@@ -658,7 +658,7 @@ EV Station Lite has been observed returning HTTP 400 for `powerStats?current=tru
 
 EV Station Lite devices may only emit `EV_POWER_STATS` while a charging session is actively streaming. The integration therefore treats the absence of a recent telemetry event as an idle charger and reports 0 kW / 0 A. A 90-second staleness timeout prevents stale live readings from persisting after a stream ends.
 
-For charging status, the integration follows the Connect frontend behavior: it prefers `shadow.chargingStatus`, reports `Charging` while live telemetry is streaming, and falls back to `Available` when the REST shadow omits the status field.
+For charging status, the integration reports `Charging` only while energy is actually flowing (live power above 0.05 kW). UniFi keeps `shadow.chargingStatus` at `Charging` for sessions that are paused, finished, or waiting on a schedule, so any connected-car state (`Charging`, `ChargingStopped`, `CableConnected`, suspended) with no measurable power is reported as `Plugged in`. Other raw values pass through unchanged, and the status falls back to `Available` when the REST shadow omits the field. The unmodified UniFi value is exposed as the diagnostic sensor `Charging status (raw)`.
 
 
 ## Live energy rollups

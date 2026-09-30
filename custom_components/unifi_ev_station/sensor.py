@@ -18,6 +18,7 @@ from homeassistant.const import (
     UnitOfPower,
     UnitOfTime,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -30,24 +31,50 @@ class UniFiEVSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
 
 
-def _status(item: dict[str, Any]) -> Any:
+# Raw chargingStatus values that mean "a car is connected" rather than
+# "energy is flowing right now". UniFi keeps reporting Charging for a session
+# that is paused or finished (car full / scheduled), so the raw value alone
+# overstates what the charger is doing.
+_CONNECTED_STATES = {"charging", "chargingstopped", "cableconnected", "suspended", "suspendedev", "suspendedevse"}
+_ACTIVE_POWER_KW = 0.05
+
+
+def _raw_status(item: dict[str, Any]) -> Any:
     device = item["device"]
-    status = _first(
+    return _first(
         device,
         ("shadow", "chargingStatus"),
         ("chargingStatus",),
         ("relayShadow", "chargingStatus"),
     )
-    if status is not None:
-        return status
+
+
+def _status(item: dict[str, Any]) -> Any:
+    raw = _raw_status(item)
+    power = item.get("power", {})
+    kw = _power_kw(item) or 0.0
+    streaming = power.get("streaming") is True
+
+    # Energy is actually flowing: this is the only case reported as Charging.
+    if streaming and kw > _ACTIVE_POWER_KW:
+        return "Charging"
+    if kw > _ACTIVE_POWER_KW:
+        return "Charging"
+
+    if raw is not None:
+        key = str(raw).replace("_", "").replace(" ", "").lower()
+        if key in _CONNECTED_STATES:
+            # Car is plugged in but not drawing power (paused, full, or
+            # waiting on a schedule).
+            return "Plugged in"
+        return raw
 
     # Connect's frontend reducer defaults a missing EV charging status to
-    # Available. While live telemetry is streaming we can safely report
-    # Charging even if the REST shadow omits chargingStatus.
-    if item.get("power", {}).get("streaming") is True:
-        return "Charging"
+    # Available. A stream with no measurable power is a connected car that is
+    # not currently drawing.
+    if streaming:
+        return "Plugged in"
     return "Available"
-
 
 
 def _live_number(item: dict[str, Any], key: str) -> float | None:
@@ -130,6 +157,12 @@ SENSORS = (
         key="charging_status",
         translation_key="charging_status",
         value_fn=_status,
+    ),
+    UniFiEVSensorDescription(
+        key="raw_charging_status",
+        translation_key="raw_charging_status",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=_raw_status,
     ),
     UniFiEVSensorDescription(
         key="last_session_energy",
