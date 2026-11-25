@@ -10,6 +10,14 @@
           "password": "Password",
           "verify_ssl": "Verify SSL certificate"
         }
+      },
+      "reauth_confirm": {
+        "title": "Sign in to UniFi OS again",
+        "description": "The UniFi console rejected the stored login. Enter the local UniFi OS account again.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -18,7 +26,8 @@
       "no_devices": "Connected, but the Connect devices endpoint returned no devices"
     },
     "abort": {
-      "already_configured": "This UniFi console is already configured"
+      "already_configured": "This UniFi console is already configured",
+      "reauth_successful": "Re-authentication was successful"
     }
   },
   "entity": {
@@ -80,6 +89,28 @@
     "number": {
       "maximum_output_amps": {
         "name": "Maximum output"
+      }
+    },
+    "binary_sensor": {
+      "telemetry_connected": {
+        "name": "Live telemetry"
+      },
+      "maximum_output_pending": {
+        "name": "Maximum output pending"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "UniFi EV Station options",
+        "description": "Limits for the Maximum output control. Decreases are always sent immediately; increases are rate limited.",
+        "data": {
+          "max_current": "Maximum current per charger (A, 6 or more; 0 = use the breaker size from the console only)",
+          "min_increase_interval": "Minimum time between current increases (seconds)",
+          "reassert_interval": "Re-send the current limit every (seconds)",
+          "scan_interval": "Polling interval (seconds)"
+        }
       }
     }
   }

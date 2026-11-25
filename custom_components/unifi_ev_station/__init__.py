@@ -29,11 +29,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: UniFiEVConfigEntry) -> b
     )
     coordinator = UniFiEVCoordinator(hass, entry, client)
     await coordinator.async_load_period_adjustments()
+    await coordinator.async_load_setpoints()
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await coordinator.async_start_websocket()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_options_updated))
     return True
+
+
+async def _async_options_updated(
+    hass: HomeAssistant, entry: UniFiEVConfigEntry
+) -> None:
+    """Reload so new limits and intervals take effect."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: UniFiEVConfigEntry) -> bool:

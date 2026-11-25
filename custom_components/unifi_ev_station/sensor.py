@@ -29,6 +29,9 @@ from .entity import UniFiEVEntity
 @dataclass(frozen=True, kw_only=True)
 class UniFiEVSensorDescription(SensorEntityDescription):
     value_fn: Callable[[dict[str, Any]], Any]
+    # Live readings come from the telemetry WebSocket. When that stream is
+    # down they are unavailable rather than a misleading 0.
+    live: bool = False
 
 
 # Raw chargingStatus values that mean "a car is connected" rather than
@@ -112,6 +115,7 @@ def _last(item: dict[str, Any], key: str) -> Any:
 SENSORS = (
     UniFiEVSensorDescription(
         key="power",
+        live=True,
         translation_key="power",
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
@@ -121,6 +125,7 @@ SENSORS = (
     ),
     UniFiEVSensorDescription(
         key="current",
+        live=True,
         translation_key="current",
         device_class=SensorDeviceClass.CURRENT,
         state_class=SensorStateClass.MEASUREMENT,
@@ -130,6 +135,7 @@ SENSORS = (
     ),
     UniFiEVSensorDescription(
         key="voltage",
+        live=True,
         translation_key="voltage",
         device_class=SensorDeviceClass.VOLTAGE,
         state_class=SensorStateClass.MEASUREMENT,
@@ -148,6 +154,7 @@ SENSORS = (
     ),
     UniFiEVSensorDescription(
         key="session_duration",
+        live=True,
         translation_key="session_duration",
         device_class=SensorDeviceClass.DURATION,
         native_unit_of_measurement=UnitOfTime.SECONDS,
@@ -256,6 +263,14 @@ class UniFiEVSensor(UniFiEVEntity, SensorEntity):
     ) -> None:
         self.entity_description = description
         super().__init__(coordinator, device_id)
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self.entity_description.live:
+            return bool(self.item.get("telemetry_connected"))
+        return True
 
     @property
     def native_value(self) -> Any:
