@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
+import math
 import time
 from typing import Any
 
@@ -30,7 +31,7 @@ from .const import (
     DOMAIN,
     TELEMETRY_IDLE_SECONDS,
 )
-from .limits import ABSOLUTE_MIN_AMPS, max_allowed
+from .limits import ABSOLUTE_MIN_AMPS, limit_problem, max_allowed
 from .setpoint import SetpointPolicy, SetpointState, decide
 
 SET_MAX_OUTPUT_ACTION = "set_max_output_amp"
@@ -117,6 +118,11 @@ def _positive_number(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+
+class UniFiEVLimitError(UniFiEVError):
+    """No verified current limit allows sending a setpoint."""
 
 
 def breaker_amperage(device: dict[str, Any]) -> float | None:
@@ -281,14 +287,21 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # Setpoint management
     # ------------------------------------------------------------------
 
-    def max_amps_for(self, device: dict[str, Any]) -> float:
-        """Highest current this integration will request for a charger."""
+    def max_amps_for(self, device: dict[str, Any]) -> float | None:
+        """Highest verified current for a charger, or None if none is known."""
         return max_allowed(breaker_amperage(device), self.user_max_current)
 
+    def limit_problem_for(self, device: dict[str, Any]) -> str | None:
+        """Why no setpoint may be sent to this charger, or None if allowed."""
+        return limit_problem(self.max_amps_for(device))
+
     def policy_for(self, device: dict[str, Any]) -> SetpointPolicy:
+        """Setpoint policy; only valid when limit_problem_for() is None."""
+        limit = self.max_amps_for(device)
+        assert limit is not None and limit >= ABSOLUTE_MIN_AMPS
         return SetpointPolicy(
             min_amps=int(ABSOLUTE_MIN_AMPS),
-            max_amps=int(self.max_amps_for(device)),
+            max_amps=int(math.floor(limit)),
             min_increase_interval=self._min_increase_interval,
             reassert_interval=self._reassert_interval,
         )
@@ -340,6 +353,9 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UniFiEVError(
                 f"Device does not advertise supported action {SET_MAX_OUTPUT_ACTION!r}"
             )
+        problem = self.limit_problem_for(device)
+        if problem is not None:
+            raise UniFiEVLimitError(problem)
 
         policy = self.policy_for(device)
         value = policy.clamp(amps)
@@ -365,6 +381,15 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Send the desired setpoint for one charger if the policy says so."""
         async with self._setpoint_lock:
             state = self.setpoint(device_id)
+            if state.desired is None:
+                return
+            problem = self.limit_problem_for(device)
+            if problem is not None:
+                # Never send (or re-assert) a value without a verified limit.
+                if state.last_error != problem:
+                    _LOGGER.error("Charger %s: %s", device_id, problem)
+                state.record_failure(problem)
+                return
             decision = decide(self.policy_for(device), state, time.monotonic())
             if not decision.send or decision.value is None:
                 if decision.reason == "increase_rate_limited":

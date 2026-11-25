@@ -153,13 +153,16 @@ with `args.maxOutput` expressed in amps.
 
 ### Limits
 
-The highest value the control offers is the lowest of:
+The integration only uses limits it can verify. The highest value the control offers is the lower of:
 
-- the breaker-based limit from UniFi Connect metadata, when available (North American 80 % table);
-- **32 A** when no breaker metadata is available (the EU EV Station Lite is a 3 x 32 A, 22 kW charger);
+- the breaker-based limit from UniFi Connect metadata, when the console reports a breaker size (North American 80 % table);
 - the **Maximum current per charger** option, if you set one.
 
-Set the option to the limit your electrician has approved for the circuit. The integration will never request more.
+If **neither** is known, the integration does not guess: the Maximum output control is locked, and no value is sent or re-sent to the charger. Set the option to the limit your electrician has approved for the circuit. The integration will never request more. EU chargers usually need this option.
+
+If the verified limit is **below 6 A** (the lowest current a charger can signal), the integration never rounds it up to 6 A. It sends nothing, and the number entity reports why. Turn charging off instead. The options form only accepts 0 (not set) or 6 A and above.
+
+The number entity's `verified_limit` and `limit_problem` attributes show the limit in use and, if the control is locked, why.
 
 ### How commands are sent (load-management safe)
 
@@ -169,6 +172,7 @@ The number entity shows the **desired** limit. The integration then decides when
 - **Increases are rate limited** (default: at most one increase every 30 s), so automations cannot make the charger oscillate. A deferred increase is sent automatically by a later update.
 - **The limit is re-sent periodically** (default every 300 s), and immediately after Home Assistant restarts, the console becomes reachable again, the telemetry stream reconnects, or a command fails. The EV Station Lite does not always report its active setpoint back, so re-sending is the only way to be sure the charger is where Home Assistant wants it.
 - Every HTTP request gives up after 10 s, so a slow console is reported as a failure instead of blocking automations.
+- **Home Assistant is in charge of the limit.** If you change the maximum output by hand in the UniFi app, the integration sets it back to Home Assistant's value at the next re-send (within 5 minutes by default). To change it, change the Home Assistant number entity, or turn your automation off first.
 
 The **Maximum output pending** diagnostic sensor is on while the desired value has not been confirmed as sent (rate limited or failed). Its attributes show `desired`, `last_sent` and `last_error`. The number entity has the same attributes.
 
@@ -193,7 +197,7 @@ If the WebSocket is disconnected, **Power**, **Current**, **Voltage** and **Sess
 
 | Option | Default | Meaning |
 |---|---|---|
-| Maximum current per charger | 0 (use breaker metadata, or 32 A) | Hard upper limit for the Maximum output control |
+| Maximum current per charger | 0 (not set: use the breaker size from the console only) | Hard upper limit for the Maximum output control. Required if the console does not report a breaker size. 6 A or more. |
 | Minimum time between current increases | 30 s | Rate limit for increases; decreases are never delayed |
 | Re-send the current limit every | 300 s | Periodic re-assertion of the desired limit |
 | Polling interval | 30 s | REST polling of devices and history |
@@ -259,7 +263,9 @@ MIT
 
 Before relying on this version for load management, follow **[TESTING.md](TESTING.md)** on your own charger.
 
-- **Safer current limit:** without breaker metadata the Maximum output control is capped at 32 A instead of 80 A. New option to set your own maximum current.
+- **Verified current limits only:** the Maximum output control uses the console's breaker size and/or the new *Maximum current per charger* option. If neither is known, the control is locked and nothing is sent, instead of assuming a default. **Upgrade note:** if your console does not report a breaker size (common on EU chargers), set the option after upgrading, or the control stays locked.
+- A limit below 6 A is never rounded up to 6 A; no setpoint is sent and the reason is shown on the entity.
+- Manual changes in the UniFi app are overwritten by the next re-send; this is now documented.
 - **Setpoint watchdog:** the desired limit is persisted and re-sent periodically, after restarts, after console outages, after telemetry reconnects and after failed commands.
 - **Rate limiting:** decreases are sent immediately; increases are limited to one per configurable interval. Unchanged values are not re-sent on every automation run.
 - **Request timeouts:** every HTTP call gives up after 10 s; network errors are reported as integration errors.

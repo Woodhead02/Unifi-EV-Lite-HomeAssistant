@@ -106,7 +106,7 @@
         "title": "UniFi EV Station options",
         "description": "Limits for the Maximum output control. Decreases are always sent immediately; increases are rate limited.",
         "data": {
-          "max_current": "Maximum current per charger (A, 0 = use breaker setting or 32 A)",
+          "max_current": "Maximum current per charger (A, 6 or more; 0 = use the breaker size from the console only)",
           "min_increase_interval": "Minimum time between current increases (seconds)",
           "reassert_interval": "Re-send the current limit every (seconds)",
           "scan_interval": "Polling interval (seconds)"

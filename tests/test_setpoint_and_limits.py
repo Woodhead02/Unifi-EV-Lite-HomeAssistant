@@ -37,11 +37,16 @@ def sent(state: SetpointState, value: int, now: float) -> None:
 
 
 class LimitsTests(unittest.TestCase):
-    def test_unknown_breaker_falls_back_to_32a_not_80a(self):
-        self.assertEqual(limits.max_allowed(None, None), 32.0)
+    def test_no_verified_limit_means_no_limit_not_a_default(self):
+        self.assertIsNone(limits.max_allowed(None, None))
+        self.assertIsNone(limits.max_allowed(0, 0))
+        self.assertIsNotNone(limits.limit_problem(None))
+
+    def test_user_limit_alone_is_enough(self):
+        self.assertEqual(limits.max_allowed(None, 16), 16.0)
+        self.assertIsNone(limits.limit_problem(16.0))
 
     def test_user_limit_wins_when_lower(self):
-        self.assertEqual(limits.max_allowed(None, 16), 16.0)
         self.assertEqual(limits.max_allowed(60, 20), 20.0)
 
     def test_user_limit_cannot_raise_above_breaker(self):
@@ -51,8 +56,14 @@ class LimitsTests(unittest.TestCase):
         self.assertEqual(limits.max_allowed(60, None), 48.0)
         self.assertEqual(limits.max_allowed(45, None), 36.0)
 
-    def test_never_below_minimum(self):
-        self.assertEqual(limits.max_allowed(None, 3), 6.0)
+    def test_limit_below_minimum_is_never_raised(self):
+        self.assertEqual(limits.max_allowed(None, 3), 3.0)
+        self.assertAlmostEqual(limits.max_allowed(6, None), 4.8)
+        self.assertIn("must stay off", limits.limit_problem(3.0))
+        self.assertIn("must stay off", limits.limit_problem(4.8))
+
+    def test_exactly_minimum_is_allowed(self):
+        self.assertIsNone(limits.limit_problem(6.0))
 
 
 class ClampTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberEntityDescription
@@ -110,7 +111,11 @@ class UniFiEVMaximumOutputNumber(UniFiEVEntity, NumberEntity, RestoreEntity):
 
     @property
     def native_max_value(self) -> float:
-        return self.coordinator.max_amps_for(self.device)
+        limit = self.coordinator.max_amps_for(self.device)
+        if self.coordinator.limit_problem_for(self.device) is not None or limit is None:
+            # No verified limit: the control is locked (setting it raises).
+            return ABSOLUTE_MIN_AMPS
+        return float(math.floor(limit))
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -120,9 +125,14 @@ class UniFiEVMaximumOutputNumber(UniFiEVEntity, NumberEntity, RestoreEntity):
             "pending": setpoint.get("pending"),
             "last_error": setpoint.get("error"),
             "reported_by_charger": _reported_max_output(self.item),
+            "verified_limit": self.coordinator.max_amps_for(self.device),
+            "limit_problem": self.coordinator.limit_problem_for(self.device),
         }
 
     async def async_set_native_value(self, value: float) -> None:
+        problem = self.coordinator.limit_problem_for(self.device)
+        if problem is not None:
+            raise ServiceValidationError(problem)
         rounded = int(round(value))
         if rounded < int(self.native_min_value) or rounded > int(self.native_max_value):
             raise ServiceValidationError(

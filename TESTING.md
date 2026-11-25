@@ -39,8 +39,10 @@ Station → your charger).
 
 - [ ] **Live telemetry** (under Diagnostic) shows **Connected**.
 - [ ] **Maximum output pending** (under Diagnostic) shows **Off**.
-- [ ] **Maximum output** slider goes from **6 to 32 A** (or lower, if you set a
-      limit in Part 3).
+- [ ] **Maximum output**: either a slider from **6 A** up to your breaker's
+      limit, or, if the console doesn't report a breaker size, **locked at 6 A**
+      with a `limit_problem` attribute saying a limit must be set. Both are
+      correct; the locked state is the safety feature working.
 - [ ] **Power / Current / Voltage** show numbers (0 is fine if no car).
 
 Then set your own limit:
@@ -49,8 +51,11 @@ Then set your own limit:
 5. Set **Maximum current per charger** to the limit your electrician approved
    (for example 16). Leave the other values as they are. Save.
 
-- [ ] **What should happen:** the Maximum output slider now stops at your
-      limit. Typing a higher number is refused with an error.
+- [ ] **What should happen:** the Maximum output slider now goes up to your
+      limit, and the `limit_problem` attribute is empty. Typing a higher number
+      is refused with an error.
+- [ ] Try entering **4** in the option. **What should happen:** the form
+      refuses it (below 6 A).
 
 ## Part 3 — Commands reach the charger (no car needed)
 

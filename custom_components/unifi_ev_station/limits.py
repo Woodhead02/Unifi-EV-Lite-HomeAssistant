@@ -14,10 +14,16 @@ NEC_BREAKER_MAX_OUTPUT: dict[int, float] = {
     100: 80.0,
 }
 
-# The EU EV Station Lite is a 22 kW, 3 x 32 A charger. When nothing better is
-# known, never offer more than this.
-SAFE_FALLBACK_MAX_AMPS = 32.0
-ABSOLUTE_MIN_AMPS = 6.0
+# IEC 61851 / SAE J1772: a charger cannot signal less than 6 A. If the
+# verified limit is below this, charging has to stay off.
+MIN_CHARGING_AMPS = 6.0
+ABSOLUTE_MIN_AMPS = MIN_CHARGING_AMPS  # backwards-compatible name
+
+NO_LIMIT_MESSAGE = (
+    "No verified current limit for this charger: the console does not report "
+    "a breaker size. Set 'Maximum current per charger' in the integration "
+    "options to the limit your electrician approved."
+)
 
 
 def breaker_limited_max(breaker: float | None) -> float | None:
@@ -30,17 +36,35 @@ def breaker_limited_max(breaker: float | None) -> float | None:
     return breaker * 0.8
 
 
-def max_allowed(breaker: float | None, user_max: float | None) -> float:
-    """Return the highest current the integration will ever request.
+def max_allowed(breaker: float | None, user_max: float | None) -> float | None:
+    """Return the highest current the integration may request, or None.
 
-    ``user_max`` is the installer's limit from the integration options and
-    always wins when it is lower. Without breaker metadata the cap falls back
-    to 32 A instead of the 80 A top of the North American table.
+    The limit comes only from verified sources: the breaker size configured
+    on the console, and the user's limit from the integration options. The
+    lower one wins. If neither is known, return None; the integration then
+    refuses to send any setpoint instead of guessing.
+
+    The result is never raised to the 6 A minimum. A limit below 6 A means
+    charging must stay off; see ``limit_problem``.
     """
-    candidates = [SAFE_FALLBACK_MAX_AMPS]
+    candidates: list[float] = []
     from_breaker = breaker_limited_max(breaker)
     if from_breaker is not None:
-        candidates = [from_breaker]
+        candidates.append(from_breaker)
     if user_max is not None and user_max > 0:
-        candidates.append(user_max)
-    return max(ABSOLUTE_MIN_AMPS, min(candidates))
+        candidates.append(float(user_max))
+    if not candidates:
+        return None
+    return min(candidates)
+
+
+def limit_problem(limit: float | None) -> str | None:
+    """Explain why no setpoint may be sent for ``limit``, or return None."""
+    if limit is None:
+        return NO_LIMIT_MESSAGE
+    if limit < MIN_CHARGING_AMPS:
+        return (
+            f"The verified current limit is {limit:g} A, below the {MIN_CHARGING_AMPS:g} A "
+            "minimum a charger can signal. Charging must stay off; no setpoint is sent."
+        )
+    return None
