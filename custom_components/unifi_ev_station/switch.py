@@ -3,6 +3,7 @@ from __future__ import annotations
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .api import UniFiEVError
@@ -54,11 +55,13 @@ class UniFiEVChargingSwitch(UniFiEVEntity, SwitchEntity):
         return None
 
     async def async_turn_on(self, **kwargs) -> None:
-        await self.coordinator.async_run_named_action(
-            self.device_id, "enable_charging"
-        )
+        await self._run("enable_charging")
 
     async def async_turn_off(self, **kwargs) -> None:
-        await self.coordinator.async_run_named_action(
-            self.device_id, "disable_charging"
-        )
+        await self._run("disable_charging")
+
+    async def _run(self, action: str) -> None:
+        try:
+            await self.coordinator.async_run_named_action(self.device_id, action)
+        except UniFiEVError as err:
+            raise HomeAssistantError(str(err)) from err

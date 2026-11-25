@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
+import time
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -17,7 +18,22 @@ from .api import (
     UniFiEVClient,
     UniFiEVError,
 )
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    CONF_MAX_CURRENT,
+    CONF_MIN_INCREASE_INTERVAL,
+    CONF_REASSERT_INTERVAL,
+    CONF_SCAN_INTERVAL,
+    DEFAULT_MAX_CURRENT,
+    DEFAULT_MIN_INCREASE_INTERVAL,
+    DEFAULT_REASSERT_INTERVAL,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+    TELEMETRY_IDLE_SECONDS,
+)
+from .limits import ABSOLUTE_MIN_AMPS, max_allowed
+from .setpoint import SetpointPolicy, SetpointState, decide
+
+SET_MAX_OUTPUT_ACTION = "set_max_output_amp"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +108,36 @@ def _session_period_contributions(session: dict[str, Any]) -> tuple[float, float
         live_month = max(meter - float(session.get("month_offset_meter") or 0.0), 0.0)
 
     return live_today, live_month
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or isinstance(value, (dict, list, tuple, set)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def breaker_amperage(device: dict[str, Any]) -> float | None:
+    """Return the breaker rating configured for the charger in UniFi Connect."""
+    return _positive_number(
+        _first(
+            device,
+            ("breakerAmperage",),
+            ("extraInfo", "breakerAm"),
+            ("shadow", "breakerAmperage"),
+        )
+    )
+
+
+def find_action(device: dict[str, Any], name: str) -> dict[str, Any] | None:
+    actions = _first(device, ("type", "supportedActions")) or []
+    return next(
+        (a for a in actions if isinstance(a, dict) and a.get("name") == name),
+        None,
+    )
+
 
 def normalize_mac(value: str | None) -> str:
     return (value or "").replace(":", "").replace("-", "").lower()
@@ -194,15 +240,217 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self._websocket_task: asyncio.Task[None] | None = None
 
+        # Telemetry WebSocket state. While it is down, live readings are
+        # reported as unavailable instead of a misleading 0 kW / 0 A.
+        self.telemetry_connected = False
+        self._telemetry_ever_connected = False
+
+        # Desired maximum-output setpoints and what was last sent. Persisted so
+        # a Home Assistant restart re-applies the intended limit.
+        self._setpoints: dict[str, SetpointState] = {}
+        self._setpoint_store: Store[dict[str, Any]] = Store(
+            hass,
+            1,
+            f"{DOMAIN}.{entry.entry_id}.setpoints",
+        )
+        self._setpoint_lock = asyncio.Lock()
+        self._last_update_failed = False
+
+        options = entry.options
+        self.user_max_current = float(
+            options.get(CONF_MAX_CURRENT, DEFAULT_MAX_CURRENT) or 0
+        ) or None
+        self._min_increase_interval = float(
+            options.get(CONF_MIN_INCREASE_INTERVAL, DEFAULT_MIN_INCREASE_INTERVAL)
+        )
+        self._reassert_interval = float(
+            options.get(CONF_REASSERT_INTERVAL, DEFAULT_REASSERT_INTERVAL)
+        )
+
         super().__init__(
             hass,
             _LOGGER,
             name=DOMAIN,
             config_entry=entry,
             update_interval=timedelta(
-                seconds=int(entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL))
+                seconds=int(options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL))
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Setpoint management
+    # ------------------------------------------------------------------
+
+    def max_amps_for(self, device: dict[str, Any]) -> float:
+        """Highest current this integration will request for a charger."""
+        return max_allowed(breaker_amperage(device), self.user_max_current)
+
+    def policy_for(self, device: dict[str, Any]) -> SetpointPolicy:
+        return SetpointPolicy(
+            min_amps=int(ABSOLUTE_MIN_AMPS),
+            max_amps=int(self.max_amps_for(device)),
+            min_increase_interval=self._min_increase_interval,
+            reassert_interval=self._reassert_interval,
+        )
+
+    def setpoint(self, device_id: str) -> SetpointState:
+        return self._setpoints.setdefault(device_id, SetpointState())
+
+    async def async_load_setpoints(self) -> None:
+        """Restore desired setpoints. The charger's real value is unknown."""
+        stored = await self._setpoint_store.async_load()
+        if not isinstance(stored, dict):
+            return
+        for device_id, desired in stored.items():
+            value = _positive_number(desired)
+            if value is not None:
+                # last_sent stays None, so the first update re-sends it.
+                self._setpoints[str(device_id)] = SetpointState(desired=int(value))
+
+    async def _async_save_setpoints(self) -> None:
+        await self._setpoint_store.async_save(
+            {
+                device_id: state.desired
+                for device_id, state in self._setpoints.items()
+                if state.desired is not None
+            }
+        )
+
+    def _mark_all_setpoints_unknown(self, reason: str) -> None:
+        for device_id, state in self._setpoints.items():
+            if state.desired is not None:
+                _LOGGER.debug(
+                    "Charger %s setpoint state unknown (%s); will re-assert",
+                    device_id,
+                    reason,
+                )
+                state.mark_unknown()
+
+    async def async_request_max_output(self, device_id: str, amps: float) -> None:
+        """Set the desired maximum output and send it if the policy allows.
+
+        Decreases go out immediately. Increases are rate limited; a deferred
+        increase is sent automatically by a later coordinator update.
+        """
+        item = self.data.get(device_id) if self.data else None
+        if not item:
+            raise UniFiEVError(f"Unknown device {device_id}")
+        device = item["device"]
+        if find_action(device, SET_MAX_OUTPUT_ACTION) is None:
+            raise UniFiEVError(
+                f"Device does not advertise supported action {SET_MAX_OUTPUT_ACTION!r}"
+            )
+
+        policy = self.policy_for(device)
+        value = policy.clamp(amps)
+        if value != int(round(amps)):
+            _LOGGER.warning(
+                "Requested %.1f A for charger %s is outside %d-%d A; using %d A",
+                amps,
+                device_id,
+                policy.min_amps,
+                policy.max_amps,
+                value,
+            )
+
+        state = self.setpoint(device_id)
+        state.desired = value
+        await self._async_save_setpoints()
+        await self._async_apply_setpoint(device_id, device)
+        self._publish_setpoint(device_id)
+
+    async def _async_apply_setpoint(
+        self, device_id: str, device: dict[str, Any]
+    ) -> None:
+        """Send the desired setpoint for one charger if the policy says so."""
+        async with self._setpoint_lock:
+            state = self.setpoint(device_id)
+            decision = decide(self.policy_for(device), state, time.monotonic())
+            if not decision.send or decision.value is None:
+                if decision.reason == "increase_rate_limited":
+                    _LOGGER.debug(
+                        "Charger %s: increase to %s A deferred by rate limit",
+                        device_id,
+                        decision.value,
+                    )
+                return
+
+            action = find_action(device, SET_MAX_OUTPUT_ACTION)
+            if action is None:
+                state.record_failure("set_max_output_amp not advertised")
+                return
+
+            previous = state.last_sent
+            try:
+                await self.client.run_action(
+                    device_id, action, args={"maxOutput": decision.value}
+                )
+            except UniFiEVError as err:
+                state.record_failure(str(err))
+                _LOGGER.warning(
+                    "Charger %s: failed to set maximum output to %s A (%s): %s",
+                    device_id,
+                    decision.value,
+                    decision.reason,
+                    err,
+                )
+                return
+
+            state.record_sent(decision.value, time.monotonic(), previous)
+            self._last_set_max_output[device_id] = decision.value
+            _LOGGER.info(
+                "Charger %s: maximum output set to %s A (%s)",
+                device_id,
+                decision.value,
+                decision.reason,
+            )
+
+    def _setpoint_snapshot(self, device_id: str) -> dict[str, Any]:
+        state = self._setpoints.get(device_id)
+        if state is None:
+            return {"desired": None, "last_sent": None, "pending": False, "error": None}
+        return {
+            "desired": state.desired,
+            "last_sent": state.last_sent,
+            "pending": state.pending,
+            "error": state.last_error,
+        }
+
+    def _publish_setpoint(self, device_id: str) -> None:
+        if not self.data or device_id not in self.data:
+            return
+        updated = dict(self.data)
+        item = dict(updated[device_id])
+        item["setpoint"] = self._setpoint_snapshot(device_id)
+        item["last_set_max_output"] = self._last_set_max_output.get(device_id)
+        updated[device_id] = item
+        self.async_set_updated_data(updated)
+
+    # ------------------------------------------------------------------
+    # Telemetry connection state
+    # ------------------------------------------------------------------
+
+    def _async_handle_telemetry_connection(self, connected: bool) -> None:
+        was_connected = self.telemetry_connected
+        self.telemetry_connected = connected
+        if connected and not was_connected:
+            if self._telemetry_ever_connected:
+                _LOGGER.info("UniFi Connect telemetry restored")
+                # The console or charger may have restarted while we were
+                # disconnected; re-assert setpoints on the next update.
+                self._mark_all_setpoints_unknown("telemetry reconnected")
+                self.hass.async_create_task(self.async_request_refresh())
+            self._telemetry_ever_connected = True
+        elif not connected and was_connected:
+            _LOGGER.warning(
+                "UniFi Connect telemetry lost; live readings are unavailable"
+            )
+        if self.data:
+            updated = {
+                device_id: {**item, "telemetry_connected": connected}
+                for device_id, item in self.data.items()
+            }
+            self.async_set_updated_data(updated)
 
     async def async_load_period_adjustments(self) -> None:
         """Load persisted day/month split adjustments."""
@@ -294,7 +542,13 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # stream as idle (0 kW / 0 A) instead of unavailable. This
                 # also prevents stale non-zero readings if the stream ends
                 # without an explicit streaming=false frame.
-                if seen is None or now - seen >= timedelta(seconds=90):
+                if not self.telemetry_connected:
+                    # No telemetry stream at all: do not pretend the charger
+                    # is idle. Live sensors become unavailable instead.
+                    latest = {}
+                elif seen is None or now - seen >= timedelta(
+                    seconds=TELEMETRY_IDLE_SECONDS
+                ):
                     latest = {
                         "instantKW": 0.0,
                         "instantA": 0.0,
@@ -366,13 +620,34 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         + live_month
                     ),
                     "last_set_max_output": self._last_set_max_output.get(device_id),
+                    "telemetry_connected": self.telemetry_connected,
+                    "setpoint": self._setpoint_snapshot(device_id),
                 }
 
-            return result
         except UniFiEVAuthError as err:
+            self._last_update_failed = True
+            self._mark_all_setpoints_unknown("authentication failed")
             raise ConfigEntryAuthFailed from err
         except UniFiEVError as err:
+            if not self._last_update_failed:
+                self._mark_all_setpoints_unknown("console unreachable")
+            self._last_update_failed = True
             raise UpdateFailed(str(err)) from err
+
+        if self._last_update_failed:
+            _LOGGER.info("UniFi console reachable again; re-asserting setpoints")
+        self._last_update_failed = False
+
+        # Watchdog: re-send any desired setpoint that is unknown, due for
+        # periodic re-assertion, or an increase that was rate limited.
+        for device_id, item in result.items():
+            if self.setpoint(device_id).desired is None:
+                continue
+            await self._async_apply_setpoint(device_id, item["device"])
+            item["setpoint"] = self._setpoint_snapshot(device_id)
+            item["last_set_max_output"] = self._last_set_max_output.get(device_id)
+
+        return result
 
     async def async_start_websocket(self) -> None:
         """Start the background EV telemetry listener."""
@@ -383,7 +658,10 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # startup, and so the config entry cancels it automatically on unload.
         self._websocket_task = self.entry.async_create_background_task(
             self.hass,
-            self.client.listen_ev_power_stats(self._async_handle_power_event),
+            self.client.listen_ev_power_stats(
+                self._async_handle_power_event,
+                self._async_handle_telemetry_connection,
+            ),
             "UniFi EV Station telemetry",
         )
 
@@ -556,7 +834,8 @@ class UniFiEVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f"Device does not advertise supported action {action_name!r}"
             )
 
+        if action_name == SET_MAX_OUTPUT_ACTION and args and "maxOutput" in args:
+            await self.async_request_max_output(device_id, float(args["maxOutput"]))
+            return
         await self.client.run_action(device_id, action, args=args)
-        if action_name == "set_max_output_amp" and args and "maxOutput" in args:
-            self._last_set_max_output[device_id] = int(args["maxOutput"])
         await self.async_request_refresh()

@@ -151,23 +151,54 @@ PATCH /proxy/connect/api/v2/devices/{device_id}/status
 
 with `args.maxOutput` expressed in amps.
 
-The integration uses breaker metadata, when available, to establish a sensible upper bound for the control.
+### Limits
+
+The highest value the control offers is the lowest of:
+
+- the breaker-based limit from UniFi Connect metadata, when available (North American 80 % table);
+- **32 A** when no breaker metadata is available (the EU EV Station Lite is a 3 x 32 A, 22 kW charger);
+- the **Maximum current per charger** option, if you set one.
+
+Set the option to the limit your electrician has approved for the circuit. The integration will never request more.
+
+### How commands are sent (load-management safe)
+
+The number entity shows the **desired** limit. The integration then decides when to send it:
+
+- **Decreases are sent immediately.** Lowering current is always the safe direction.
+- **Increases are rate limited** (default: at most one increase every 30 s), so automations cannot make the charger oscillate. A deferred increase is sent automatically by a later update.
+- **The limit is re-sent periodically** (default every 300 s), and immediately after Home Assistant restarts, the console becomes reachable again, the telemetry stream reconnects, or a command fails. The EV Station Lite does not always report its active setpoint back, so re-sending is the only way to be sure the charger is where Home Assistant wants it.
+- Every HTTP request gives up after 10 s, so a slow console is reported as a failure instead of blocking automations.
+
+The **Maximum output pending** diagnostic sensor is on while the desired value has not been confirmed as sent (rate limited or failed). Its attributes show `desired`, `last_sent` and `last_error`. The number entity has the same attributes.
 
 ### EV Station Lite readback behavior
 
-Some EV Station Lite firmware does not expose the current maximum-output value in the normal device shadow returned by the `/devices` endpoint. In that case:
+Some EV Station Lite firmware does not expose the current maximum-output value in the normal device shadow returned by the `/devices` endpoint. The integration therefore persists the desired value across restarts and re-asserts it as described above. If UniFi exposes a readback field, it is shown as the `reported_by_charger` attribute.
 
-- The control can still write a new amperage value if `set_max_output_amp` is advertised.
-- The number entity may initially have an unknown state after a fresh Home Assistant restart.
-- After a value is set through Home Assistant, the integration keeps the latest setpoint in memory for the running session.
-
-If UniFi exposes a reliable readback field in a future firmware/API version, the integration can be updated to use it.
+> [!IMPORTANT]
+> Software load management is not a substitute for electrical protection. Also set a safe fixed limit in UniFi Connect (**Total Amps Available** / per-station maximum): if Home Assistant stops, the charger keeps its last setting.
 
 ## Live telemetry
 
 Live charging measurements come from the local UniFi Connect WebSocket, the same event stream used by the Connect interface. This provides push updates for power, current, voltage, session energy, and session duration while the charger is streaming telemetry.
 
 Historical charging and energy totals continue to come from the Connect REST API. No cloud polling is required.
+
+If the WebSocket is disconnected, **Power**, **Current**, **Voltage** and **Session duration** become *unavailable* instead of reporting 0. A charger that is simply idle (stream connected, no frames for 90 s) still reports 0. The **Live telemetry** diagnostic sensor shows whether the stream is connected, so automations can stop trusting live values when it is off.
+
+## Options
+
+**Settings -> Devices & services -> UniFi EV Station -> Configure**:
+
+| Option | Default | Meaning |
+|---|---|---|
+| Maximum current per charger | 0 (use breaker metadata, or 32 A) | Hard upper limit for the Maximum output control |
+| Minimum time between current increases | 30 s | Rate limit for increases; decreases are never delayed |
+| Re-send the current limit every | 300 s | Periodic re-assertion of the desired limit |
+| Polling interval | 30 s | REST polling of devices and history |
+
+If the console rejects the stored login (for example after a password change), Home Assistant asks you to sign in again instead of failing.
 
 ## Known limitations
 
@@ -212,11 +243,30 @@ The repository includes GitHub Actions for:
 - HACS repository validation
 - Home Assistant `hassfest` validation
 
+Unit tests for the setpoint policy and current limits run with the standard library only:
+
+```bash
+python3 -m unittest discover tests
+```
+
 ## License
 
 MIT
 
 ## Release notes
+
+### v1.1.0
+
+- **Safer current limit:** without breaker metadata the Maximum output control is capped at 32 A instead of 80 A. New option to set your own maximum current.
+- **Setpoint watchdog:** the desired limit is persisted and re-sent periodically, after restarts, after console outages, after telemetry reconnects and after failed commands.
+- **Rate limiting:** decreases are sent immediately; increases are limited to one per configurable interval. Unchanged values are not re-sent on every automation run.
+- **Request timeouts:** every HTTP call gives up after 10 s; network errors are reported as integration errors.
+- **Telemetry state:** new *Live telemetry* diagnostic sensor. Live sensors become unavailable while the WebSocket is down instead of reporting 0.
+- New *Maximum output pending* diagnostic sensor with `desired`, `last_sent` and `last_error` attributes.
+- **Re-authentication flow** when the stored login stops working, and an **options flow** for limits and intervals.
+- Logins are serialised so the WebSocket and polling never log in at the same time.
+- Entity actions now raise Home Assistant errors with clear messages.
+- Unit tests for the setpoint policy and limits. Removed the duplicate `Readme.md`.
 
 ### v1.0.1
 

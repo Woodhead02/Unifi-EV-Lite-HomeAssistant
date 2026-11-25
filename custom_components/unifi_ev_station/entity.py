@@ -18,6 +18,15 @@ class UniFiEVEntity(CoordinatorEntity[UniFiEVCoordinator]):
         self._attr_unique_id = f"{device_id}_{self.entity_description.key}"
 
     @property
+    def available(self) -> bool:
+        # A charger removed from UniFi Connect disappears from the data.
+        return (
+            super().available
+            and self.coordinator.data is not None
+            and self.device_id in self.coordinator.data
+        )
+
+    @property
     def item(self) -> dict[str, Any]:
         return self.coordinator.data[self.device_id]
 

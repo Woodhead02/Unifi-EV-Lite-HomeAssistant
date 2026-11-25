@@ -9,13 +9,15 @@ from collections.abc import Callable
 from typing import Any
 
 from aiohttp import (
+    ClientError,
     ClientResponse,
     ClientSession,
+    ClientTimeout,
     WSMsgType,
     WSServerHandshakeError,
 )
 
-from .const import CONNECT_BASE
+from .const import CONNECT_BASE, REQUEST_TIMEOUT, WEBSOCKET_CONNECT_TIMEOUT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +54,10 @@ class UniFiEVClient:
         self.password = password
         self.csrf_token: str | None = None
         self._logged_in = False
+        # The telemetry WebSocket and the polling coordinator share one
+        # session. Serialise logins so they never race each other.
+        self._login_lock = asyncio.Lock()
+        self._timeout = ClientTimeout(total=REQUEST_TIMEOUT)
 
     @staticmethod
     def _csrf_from_cookie(token: str | None) -> str | None:
@@ -83,9 +89,23 @@ class UniFiEVClient:
                 self.csrf_token = csrf
                 return
 
+    async def ensure_logged_in(self) -> None:
+        """Log in once, even when several callers need a session at once."""
+        if self._logged_in:
+            return
+        async with self._login_lock:
+            if not self._logged_in:
+                await self.login()
+
+    def invalidate_session(self) -> None:
+        """Mark the session as expired so the next call logs in again."""
+        self._logged_in = False
+
     async def login(self) -> None:
         """Authenticate with a local UniFi OS account."""
-        async with self.session.get(self.host, allow_redirects=False) as response:
+        async with self.session.get(
+            self.host, allow_redirects=False, timeout=self._timeout
+        ) as response:
             self._update_csrf(response)
             await response.read()
 
@@ -104,6 +124,7 @@ class UniFiEVClient:
             f"{self.host}/api/auth/login",
             json=payload,
             headers=headers,
+            timeout=self._timeout,
         ) as response:
             text = await response.text()
             self._update_csrf(response)
@@ -126,49 +147,53 @@ class UniFiEVClient:
         retry_auth: bool = True,
         **kwargs: Any,
     ) -> Any:
-        if not self._logged_in:
-            await self.login()
+        await self.ensure_logged_in()
 
         headers = dict(kwargs.pop("headers", {}))
         if self.csrf_token:
             headers["X-CSRF-Token"] = self.csrf_token
+        kwargs.setdefault("timeout", self._timeout)
 
-        async with self.session.request(
-            method,
-            f"{self.host}{path}",
-            headers=headers,
-            **kwargs,
-        ) as response:
-            text = await response.text()
-            self._update_csrf(response)
+        try:
+            async with self.session.request(
+                method,
+                f"{self.host}{path}",
+                headers=headers,
+                **kwargs,
+            ) as response:
+                text = await response.text()
+                self._update_csrf(response)
+                status = response.status
+        except TimeoutError as err:
+            raise UniFiEVError(
+                f"{method} {path} timed out after {REQUEST_TIMEOUT}s"
+            ) from err
+        except ClientError as err:
+            raise UniFiEVError(f"{method} {path} failed: {err}") from err
 
-            if response.status == 401 and retry_auth:
-                self._logged_in = False
-                await self.login()
-                return await self.request(method, path, retry_auth=False, **kwargs)
-            if response.status == 401:
-                raise UniFiEVAuthError("UniFi OS session is not authenticated")
-            if response.status == 403:
-                raise UniFiEVPermissionError(
-                    f"UniFi OS denied {method} {path}: {text[:300]}"
-                )
-            if (
-                response.status == 400
-                and "does not support power insight" in text.lower()
-            ):
-                raise UniFiEVUnsupportedFeatureError(
-                    f"Device does not support power insight for {path}"
-                )
-            if response.status >= 400:
-                raise UniFiEVError(
-                    f"HTTP {response.status} for {method} {path}: {text[:300]}"
-                )
-            if not text:
-                return None
-            try:
-                return json.loads(text)
-            except json.JSONDecodeError:
-                return text
+        if status == 401 and retry_auth:
+            self.invalidate_session()
+            return await self.request(
+                method, path, retry_auth=False, headers=headers, **kwargs
+            )
+        if status == 401:
+            raise UniFiEVAuthError("UniFi OS session is not authenticated")
+        if status == 403:
+            raise UniFiEVPermissionError(
+                f"UniFi OS denied {method} {path}: {text[:300]}"
+            )
+        if status == 400 and "does not support power insight" in text.lower():
+            raise UniFiEVUnsupportedFeatureError(
+                f"Device does not support power insight for {path}"
+            )
+        if status >= 400:
+            raise UniFiEVError(f"HTTP {status} for {method} {path}: {text[:300]}")
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
 
     async def get_devices(self) -> list[dict[str, Any]]:
         payload = await self.request("GET", f"{CONNECT_BASE}/devices")
@@ -290,17 +315,31 @@ class UniFiEVClient:
     async def listen_ev_power_stats(
         self,
         callback: Callable[[dict[str, Any]], Any],
+        on_connection_change: Callable[[bool], Any] | None = None,
     ) -> None:
         """Maintain the Connect WebSocket and emit EV_POWER_STATS events.
 
         This coroutine is intended to run as a Home Assistant background task.
-        It reconnects automatically until cancelled.
+        It reconnects automatically until cancelled. ``on_connection_change``
+        is called with True when the stream is up and False when it drops, so
+        consumers can tell "idle charger" apart from "no telemetry at all".
         """
         backoff = 2
+        connected = False
+
+        async def _set_connected(value: bool) -> None:
+            nonlocal connected
+            if connected == value or on_connection_change is None:
+                connected = value
+                return
+            connected = value
+            result = on_connection_change(value)
+            if inspect.isawaitable(result):
+                await result
+
         while True:
             try:
-                if not self._logged_in:
-                    await self.login()
+                await self.ensure_logged_in()
 
                 async with self.session.ws_connect(
                     self.websocket_url,
@@ -308,9 +347,11 @@ class UniFiEVClient:
                     heartbeat=30,
                     autoping=True,
                     autoclose=True,
+                    timeout=WEBSOCKET_CONNECT_TIMEOUT,
                 ) as websocket:
                     _LOGGER.debug("Connected to UniFi Connect EV telemetry WebSocket")
                     backoff = 2
+                    await _set_connected(True)
 
                     async for message in websocket:
                         events: list[dict[str, Any]] = []
@@ -350,15 +391,16 @@ class UniFiEVClient:
                                 await result
 
             except asyncio.CancelledError:
+                await _set_connected(False)
                 raise
             except WSServerHandshakeError as err:
                 if err.status in (401, 403):
-                    self._logged_in = False
+                    self.invalidate_session()
                 _LOGGER.warning(
                     "UniFi Connect telemetry WebSocket handshake failed (HTTP %s); retrying",
                     err.status,
                 )
-            except (UniFiEVError, OSError) as err:
+            except (UniFiEVError, OSError, ClientError, TimeoutError) as err:
                 _LOGGER.warning(
                     "UniFi Connect telemetry WebSocket disconnected: %s; retrying",
                     err,
@@ -366,6 +408,7 @@ class UniFiEVClient:
             except Exception:
                 _LOGGER.exception("Unexpected UniFi Connect telemetry WebSocket error")
 
+            await _set_connected(False)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
