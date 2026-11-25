@@ -257,6 +257,8 @@ MIT
 
 ### v1.1.0
 
+Before relying on this version for load management, follow **[TESTING.md](TESTING.md)** on your own charger.
+
 - **Safer current limit:** without breaker metadata the Maximum output control is capped at 32 A instead of 80 A. New option to set your own maximum current.
 - **Setpoint watchdog:** the desired limit is persisted and re-sent periodically, after restarts, after console outages, after telemetry reconnects and after failed commands.
 - **Rate limiting:** decreases are sent immediately; increases are limited to one per configurable interval. Unchanged values are not re-sent on every automation run.
